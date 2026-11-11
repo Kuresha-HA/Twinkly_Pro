@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Twinkly Controller",
+        "description": "Enter the local IP address or hostname of your Twinkly device. Geometry (2D/3D layout), groups (Master/Slave), movies, and playlists will be loaded directly from the controller.",
+        "data": {
+          "host": "IP Address / Hostname"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Discovered Twinkly Device",
+        "description": "Do you want to add **{name}** (`{model}`, {leds} LEDs at `{host}`) to Twinkly Pro?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to the Twinkly device on the local network.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Twinkly device is already configured.",
+      "cannot_connect": "Failed to connect to the discovered Twinkly device."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Twinkly Pro Settings",
+        "description": "Configure the embedded Twinkly Studio web panel and optional Twinkly Cloud credentials.",
+        "data": {
+          "enable_panel": "Show 'Twinkly Studio' panel in Home Assistant sidebar",
+          "cloud_email": "Twinkly Cloud Email (optional)",
+          "cloud_password": "Twinkly Cloud Password (optional)"
+        }
+      }
+    }
+  }
+}

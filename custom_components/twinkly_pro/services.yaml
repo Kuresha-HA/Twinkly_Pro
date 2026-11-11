@@ -1,0 +1,167 @@
+set_mode:
+  name: Set Operating Mode
+  description: Switch a Twinkly controller (or Master group) to the specified operating mode.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Config entry ID of the target Twinkly controller (optional if only one is configured).
+      required: false
+      selector:
+        text:
+    mode:
+      name: Mode
+      description: Target Twinkly mode.
+      required: true
+      selector:
+        select:
+          options:
+            - "off"
+            - "color"
+            - "movie"
+            - "playlist"
+            - "music"
+            - "rt"
+            - "demo"
+
+upload_generated_movie:
+  name: Compile & Upload 2D/3D Movie to Flash
+  description: Generate a 2D/3D procedural animation mapped to the controller's physical LED layout and upload it into flash memory.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      description: Config entry ID of the target Twinkly controller.
+      required: false
+      selector:
+        text:
+    name:
+      name: Movie Name
+      description: Display name for the movie stored in flash memory.
+      required: true
+      default: "Studio Effect"
+      selector:
+        text:
+    preset:
+      name: Effect Preset
+      description: Procedural 2D/3D generator preset.
+      required: true
+      default: "rainbow_wave"
+      selector:
+        select:
+          options:
+            - "rainbow_wave"
+            - "gradient_flow"
+            - "plasma_2d"
+            - "sparkle_twinkle"
+            - "fire_flame"
+            - "equalizer_bars"
+            - "matrix_rain"
+            - "aurora_borealis"
+    duration_seconds:
+      name: Loop Duration (s)
+      description: Duration of the generated movie loop in seconds.
+      required: false
+      default: 6
+      selector:
+        number:
+          min: 2
+          max: 20
+          step: 1
+    fps:
+      name: Frame Rate (FPS)
+      description: Frames per second for the compiled movie.
+      required: false
+      default: 20
+      selector:
+        number:
+          min: 10
+          max: 30
+          step: 1
+    primary_color:
+      name: Primary Color (#RRGGBB)
+      required: false
+      default: "#ff007f"
+      selector:
+        text:
+    secondary_color:
+      name: Secondary Color (#RRGGBB)
+      required: false
+      default: "#00e5ff"
+      selector:
+        text:
+
+set_playlist:
+  name: Set Device Playlist
+  description: Overwrite the playlist queue on a Twinkly controller with custom movie unique_ids and durations.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      required: false
+      selector:
+        text:
+    entries:
+      name: Playlist Entries
+      description: List of dictionaries containing 'unique_id' and 'duration' (in seconds).
+      required: true
+      selector:
+        object:
+
+start_rt_effect:
+  name: Start Live UDP Real-Time Effect
+  description: Switch the controller to RT mode and stream a live 2D/3D procedural effect over UDP port 7777.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      required: false
+      selector:
+        text:
+    preset:
+      name: Effect Preset
+      required: true
+      default: "rainbow_wave"
+      selector:
+        select:
+          options:
+            - "rainbow_wave"
+            - "gradient_flow"
+            - "plasma_2d"
+            - "sparkle_twinkle"
+            - "fire_flame"
+            - "equalizer_bars"
+            - "matrix_rain"
+            - "aurora_borealis"
+    fps:
+      name: Frame Rate (FPS)
+      required: false
+      default: 25
+      selector:
+        number:
+          min: 10
+          max: 50
+          step: 1
+
+stop_rt_effect:
+  name: Stop Live UDP Real-Time Effect
+  description: Stop active UDP Real-Time streaming and restore movie/color mode.
+  fields:
+    entry_id:
+      name: Config Entry ID
+      required: false
+      selector:
+        text:
+
+configure_sync_group:
+  name: Configure Master/Slave Sync Group
+  description: Create a synchronized group of Twinkly controllers (Master + Slaves) or disband an existing group straight from Home Assistant.
+  fields:
+    master_entry_id:
+      name: Master Controller Entry ID
+      description: Config entry ID of the Master Twinkly controller.
+      required: true
+      selector:
+        text:
+    slave_entry_ids:
+      name: Slave Controller Entry IDs
+      description: List of config entry IDs for Slave controllers (leave empty to disband group).
+      required: false
+      selector:
+        object:

@@ -1,0 +1,38 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Подключение гирлянды Twinkly",
+        "description": "Введите локальный IP-адрес или имя хоста контроллера Twinkly. 2D/3D геометрия диодов, конфигурация групп (Master/Slave), эффекты и плейлисты будут считаны напрямую из памяти устройства.",
+        "data": {
+          "host": "IP-адрес / Хост"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Обнаружена гирлянда Twinkly",
+        "description": "Добавить **{name}** (`{model}`, {leds} диодов, IP `{host}`) в Twinkly Pro?"
+      }
+    },
+    "error": {
+      "cannot_connect": "Не удалось подключиться к гирлянде Twinkly по локальной сети.",
+      "unknown": "Произошла непредвиденная ошибка."
+    },
+    "abort": {
+      "already_configured": "Это устройство Twinkly уже добавлено.",
+      "cannot_connect": "Не удалось подключиться к обнаруженному устройству Twinkly."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Настройки Twinkly Pro",
+        "description": "Настройка встроенной боковой панели 'Twinkly Studio' и опциональной учетной записи облака Twinkly.",
+        "data": {
+          "enable_panel": "Показывать панель 'Twinkly Studio' в боковом меню Home Assistant",
+          "cloud_email": "Email аккаунта Twinkly Cloud (необязательно)",
+          "cloud_password": "Пароль аккаунта Twinkly Cloud (необязательно)"
+        }
+      }
+    }
+  }
+}

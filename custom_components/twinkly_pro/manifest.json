@@ -1,0 +1,17 @@
+{
+  "domain": "twinkly_pro",
+  "name": "Twinkly Pro",
+  "codeowners": ["@Kuresha-HA"],
+  "config_flow": true,
+  "dependencies": ["http", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/Kuresha-HA/Twinkly_Pro",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/Kuresha-HA/Twinkly_Pro/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": [
+    {
+      "type": "_xled._tcp.local."
+    }
+  ]
+}
