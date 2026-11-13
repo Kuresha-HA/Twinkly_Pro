@@ -11,6 +11,7 @@ import pytest
 from custom_components.twinkly_pro.twinkly_client import (
     CURATED_GALLERY_TEMPLATES,
     DeviceLayout,
+    DiscoveredTwinklyDevice,
     GestaltInfo,
     MoviesState,
     PlaylistState,
@@ -19,6 +20,9 @@ from custom_components.twinkly_pro.twinkly_client import (
     TwinklyRealtimeStreamer,
     compile_custom_frames_movie,
     compile_procedural_movie,
+)
+from custom_components.twinkly_pro.twinkly_client.discovery import (
+    _TwinklyDiscoveryProtocol,
 )
 
 
@@ -276,3 +280,36 @@ async def test_client_auth_and_movie_upload_over_http() -> None:
     finally:
         await client.close()
         await runner.cleanup()
+
+
+def test_udp_5555_discovery_packet_parsing() -> None:
+    """Verify UDP port 5555 discovery response packet parses device name and IP."""
+    proto = _TwinklyDiscoveryProtocol()
+    # 4 reversed IP bytes + b'OK' + b'Curtain-400\x00'
+    packet = bytes([145, 1, 168, 192]) + b"OKCurtain-400\x00"
+    proto.datagram_received(packet, ("192.168.1.145", 5555))
+    assert proto.found_hosts == {"192.168.1.145": "Curtain-400"}
+
+
+def test_discovered_device_display_label_with_scene_and_composition() -> None:
+    """Verify DiscoveredTwinklyDevice formats scene, composition, and LED count."""
+    dev = DiscoveredTwinklyDevice(
+        host="192.168.1.145",
+        name="Curtain-400",
+        mac="40:4c:ca:11:22:33",
+        uuid="uuid-curtain-400",
+        product_code="TWW400SPP",
+        number_of_led=400,
+        led_profile="RGB",
+        sync_mode="master",
+        group_uid="grp_curtain",
+        scene_name="Гостиная",
+        composition_name="Штора Окно",
+    )
+    label = dev.display_label
+    assert "Curtain-400" in label
+    assert "400 RGB" in label
+    assert "Сцена: Гостиная" in label
+    assert "[Штора Окно: MASTER]" in label
+    assert "IP: 192.168.1.145" in label
+

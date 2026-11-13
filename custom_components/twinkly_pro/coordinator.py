@@ -65,6 +65,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             else "Twinkly Smart LED"
         )
         sw_version = snap.fw_version if snap else "unknown"
+        scene_area = self.entry.data.get("scene_name") or None
 
         return DeviceInfo(
             identifiers={(DOMAIN, mac)},
@@ -72,6 +73,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             manufacturer="Twinkly (Ledworks)",
             model=model,
             sw_version=sw_version,
+            suggested_area=scene_area,
             configuration_url=f"http://{self.host}",
         )
 

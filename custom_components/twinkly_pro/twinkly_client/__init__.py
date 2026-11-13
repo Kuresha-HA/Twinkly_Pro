@@ -1,4 +1,4 @@
-"""Twinkly XLED v1 client and procedural movie engine."""
+"""Twinkly XLED v1 client, LAN UDP discovery, Cloud sync, and procedural movie engine."""
 
 from .client import (
     TwinklyAuthError,
@@ -6,7 +6,17 @@ from .client import (
     TwinklyConnectionError,
     TwinklyError,
 )
-from .cloud import CURATED_GALLERY_TEMPLATES, TwinklyCloudClient
+from .cloud import (
+    CURATED_GALLERY_TEMPLATES,
+    CloudAccountResult,
+    TwinklyCloudClient,
+)
+from .discovery import (
+    DiscoveredTwinklyDevice,
+    async_discover_lan_hosts,
+    async_discover_twinkly_devices,
+    async_probe_discovered_host,
+)
 from .models import (
     DeviceBrightness,
     DeviceColor,
@@ -31,9 +41,11 @@ from .rt_udp import TwinklyRealtimeStreamer
 
 __all__ = [
     "CURATED_GALLERY_TEMPLATES",
+    "CloudAccountResult",
     "DeviceBrightness",
     "DeviceColor",
     "DeviceLayout",
+    "DiscoveredTwinklyDevice",
     "GestaltInfo",
     "LedCoordinate",
     "MovieEntry",
@@ -50,6 +62,9 @@ __all__ = [
     "TwinklyDeviceSnapshot",
     "TwinklyError",
     "TwinklyRealtimeStreamer",
+    "async_discover_lan_hosts",
+    "async_discover_twinkly_devices",
+    "async_probe_discovered_host",
     "compile_custom_frames_movie",
     "compile_procedural_movie",
     "generate_effect_frame",

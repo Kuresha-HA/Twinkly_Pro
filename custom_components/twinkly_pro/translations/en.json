@@ -2,10 +2,28 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect Twinkly Controller",
-        "description": "Enter the local IP address or hostname of your Twinkly device. Geometry (2D/3D layout), groups (Master/Slave), movies, and playlists will be loaded directly from the controller.",
+        "title": "Step 1: Twinkly Cloud Account (Optional)",
+        "description": "Sign in to your Twinkly Cloud account to pull your scenes, grouped compositions, and devices automatically, or check **Skip Cloud Login** to scan the local network directly.",
         "data": {
-          "host": "IP Address / Hostname"
+          "cloud_email": "Twinkly Account Email",
+          "cloud_password": "Twinkly Account Password",
+          "skip_cloud": "Skip Cloud Login (discover on local network / add manually)"
+        }
+      },
+      "discovery_select": {
+        "title": "Step 2: Discovered Devices, Scenes & Compositions",
+        "description": "Found **{count}** Twinkly device(s).\n• **Cloud:** {cloud_status}\n• **Scenes:** {scenes}\n• **Compositions / Groups:** {compositions}\n\nSelect the devices to add to Home Assistant:",
+        "data": {
+          "selected_devices": "Discovered Twinkly Devices",
+          "add_manual_ip": "Also add another device manually by IP address on the next step"
+        }
+      },
+      "manual": {
+        "title": "Step 3: Manual IP Addition (Optional)",
+        "description": "Queued devices to add: **{queued_count}**. You can optionally enter the IP address of an additional Twinkly controller (e.g., on another VLAN), or check **Skip** to finish.",
+        "data": {
+          "host": "Device IP Address / Hostname (optional)",
+          "skip_manual": "Skip manual IP entry and finish setup"
         }
       },
       "zeroconf_confirm": {
@@ -14,12 +32,14 @@
       }
     },
     "error": {
-      "cannot_connect": "Failed to connect to the Twinkly device on the local network.",
+      "cannot_connect": "Failed to connect to the Twinkly device at the specified IP address.",
       "unknown": "Unexpected error occurred."
     },
     "abort": {
       "already_configured": "This Twinkly device is already configured.",
-      "cannot_connect": "Failed to connect to the discovered Twinkly device."
+      "cannot_connect": "Failed to connect to the discovered Twinkly device.",
+      "no_devices_selected": "No devices were selected.",
+      "manual_skipped": "Setup finished (manual IP entry skipped)."
     }
   },
   "options": {

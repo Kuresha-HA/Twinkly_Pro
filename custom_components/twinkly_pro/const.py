@@ -6,7 +6,7 @@ from typing import Final
 
 DOMAIN: Final = "twinkly_pro"
 NAME: Final = "Twinkly Pro"
-VERSION: Final = "0.1.0"
+VERSION: Final = "0.2.0"
 
 # Configuration keys
 CONF_HOST: Final = "host"
@@ -18,6 +18,13 @@ CONF_LED_PROFILE: Final = "led_profile"
 CONF_NUM_LEDS: Final = "number_of_led"
 CONF_CLOUD_EMAIL: Final = "cloud_email"
 CONF_CLOUD_PASSWORD: Final = "cloud_password"
+CONF_SKIP_CLOUD: Final = "skip_cloud"
+CONF_SELECTED_DEVICES: Final = "selected_devices"
+CONF_ADD_MANUAL_IP: Final = "add_manual_ip"
+CONF_SKIP_MANUAL: Final = "skip_manual"
+CONF_SCENE_NAME: Final = "scene_name"
+CONF_COMPOSITION_NAME: Final = "composition_name"
+CONF_GROUP_UID: Final = "group_uid"
 CONF_ENABLE_PANEL: Final = "enable_panel"
 
 # Default values

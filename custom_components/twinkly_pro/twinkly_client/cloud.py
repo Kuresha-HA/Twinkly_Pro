@@ -1,15 +1,21 @@
-"""Twinkly Cloud & curated effect gallery store client."""
+"""Twinkly Cloud account sync & curated effect gallery store client."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
 from typing import Any
 
 import aiohttp
 
+from .discovery import DiscoveredTwinklyDevice, async_discover_twinkly_devices
+
 _LOGGER = logging.getLogger(__name__)
 
-TWINKLY_CLOUD_BASE = "https://api.twinkly.com/v2"
+TWINKLY_CLOUD_ENDPOINTS: list[str] = [
+    "https://api.twinkly.com/v2",
+    "https://api.twinkly.com/v1",
+]
 
 # Rich curated effect gallery templates available offline and online
 CURATED_GALLERY_TEMPLATES: list[dict[str, Any]] = [
@@ -160,31 +166,205 @@ CURATED_GALLERY_TEMPLATES: list[dict[str, Any]] = [
 ]
 
 
+@dataclass(slots=True)
+class CloudAccountResult:
+    """Result of cloud login and hybrid LAN + Cloud device/scene discovery."""
+
+    authenticated: bool = False
+    email: str = ""
+    devices: list[DiscoveredTwinklyDevice] = field(default_factory=list)
+    scenes: list[str] = field(default_factory=list)
+    compositions: dict[str, str] = field(default_factory=dict)  # group_uid -> name
+
+
 class TwinklyCloudClient:
-    """Client for accessing Twinkly Cloud and the curated effect store gallery."""
+    """Client for accessing Twinkly Cloud and merging cloud scenes/groups with LAN discovery."""
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
         """Initialize the cloud client."""
         self._session = session
+        self._owns_session = session is None
         self._token: str | None = None
+        self._active_base: str = TWINKLY_CLOUD_ENDPOINTS[0]
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=8.0)
+            )
+            self._owns_session = True
+        return self._session
+
+    async def close(self) -> None:
+        """Close the HTTP session if owned by this client."""
+        if self._owns_session and self._session and not self._session.closed:
+            await self._session.close()
 
     async def login(self, email: str, password: str) -> bool:
         """Attempt login to Twinkly Cloud account."""
-        if not email or not password or self._session is None:
+        if not email or not password:
             return False
-        try:
-            async with self._session.post(
-                f"{TWINKLY_CLOUD_BASE}/login",
-                json={"email": email, "password": password},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json(content_type=None)
-                    self._token = data.get("authorization_token") or data.get("token")
-                    return bool(self._token)
-        except Exception as err:
-            _LOGGER.debug("Twinkly cloud login skipped or unavailable: %s", err)
+        session = await self._ensure_session()
+
+        for base_url in TWINKLY_CLOUD_ENDPOINTS:
+            for path in ("/login", "/auth/login", "/users/login"):
+                try:
+                    async with session.post(
+                        f"{base_url}{path}",
+                        json={"email": email, "password": password},
+                        headers={"Accept": "application/json"},
+                        timeout=aiohttp.ClientTimeout(total=6.0),
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json(content_type=None)
+                            if isinstance(data, dict):
+                                token = (
+                                    data.get("authorization_token")
+                                    or data.get("authentication_token")
+                                    or data.get("access_token")
+                                    or data.get("token")
+                                )
+                                if token:
+                                    self._token = str(token)
+                                    self._active_base = base_url
+                                    return True
+                except Exception as err:
+                    _LOGGER.debug(
+                        "Twinkly cloud login probe %s%s failed: %s",
+                        base_url,
+                        path,
+                        err,
+                    )
         return False
+
+    async def fetch_cloud_inventory(self) -> dict[str, Any]:
+        """Fetch cloud devices, groups (compositions), and scenes if authenticated."""
+        if not self._token:
+            return {}
+        session = await self._ensure_session()
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "X-Auth-Token": self._token,
+            "Accept": "application/json",
+        }
+        inventory: dict[str, Any] = {"devices": [], "groups": [], "scenes": []}
+
+        for key, path in (
+            ("devices", "/devices"),
+            ("groups", "/groups"),
+            ("scenes", "/scenes"),
+            ("scenes", "/installations"),
+        ):
+            try:
+                async with session.get(
+                    f"{self._active_base}{path}",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=6.0),
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json(content_type=None)
+                        if isinstance(data, dict):
+                            items = data.get(key) or data.get("data") or []
+                            if isinstance(items, list):
+                                inventory[key].extend(items)
+                        elif isinstance(data, list):
+                            inventory[key].extend(data)
+            except Exception as err:
+                _LOGGER.debug("Cloud inventory fetch %s skipped: %s", path, err)
+
+        return inventory
+
+    async def async_discover_account_and_lan(
+        self,
+        email: str = "",
+        password: str = "",
+        extra_hosts: list[str] | None = None,
+    ) -> CloudAccountResult:
+        """Authenticate with Cloud (if credentials given), scan LAN via UDP 5555, and merge."""
+        session = await self._ensure_session()
+        cloud_ok = False
+        cloud_inv: dict[str, Any] = {}
+
+        if email and password:
+            cloud_ok = await self.login(email, password)
+            if cloud_ok:
+                cloud_inv = await self.fetch_cloud_inventory()
+
+        # Always run fast UDP 5555 LAN broadcast discovery to locate live controllers & compositions
+        lan_devices = await async_discover_twinkly_devices(
+            session=session,
+            extra_hosts=extra_hosts,
+        )
+
+        # Index cloud metadata by MAC / UUID
+        cloud_by_mac: dict[str, dict[str, Any]] = {}
+        cloud_by_uuid: dict[str, dict[str, Any]] = {}
+        compositions: dict[str, str] = {}
+        scenes_set: set[str] = set()
+
+        for grp in cloud_inv.get("groups", []):
+            if isinstance(grp, dict):
+                gid = str(grp.get("uid") or grp.get("id") or grp.get("group_uid") or "")
+                gname = str(grp.get("name") or "Композиция Twinkly")
+                if gid:
+                    compositions[gid] = gname
+
+        for sc in cloud_inv.get("scenes", []):
+            if isinstance(sc, dict) and sc.get("name"):
+                scenes_set.add(str(sc["name"]))
+
+        for cdev in cloud_inv.get("devices", []):
+            if not isinstance(cdev, dict):
+                continue
+            cmac = str(cdev.get("mac") or cdev.get("hw_address") or "").lower()
+            cuuid = str(cdev.get("uuid") or cdev.get("id") or "")
+            if cmac:
+                cloud_by_mac[cmac] = cdev
+            if cuuid:
+                cloud_by_uuid[cuuid] = cdev
+
+        # Enrich LAN-discovered devices with Cloud scene & composition metadata
+        for dev in lan_devices:
+            c_meta = cloud_by_mac.get(dev.mac.lower()) or cloud_by_uuid.get(dev.uuid)
+            if c_meta:
+                dev.source = "cloud+lan"
+                if c_meta.get("name"):
+                    dev.name = str(c_meta["name"])
+                scene_label = str(
+                    c_meta.get("scene")
+                    or c_meta.get("room")
+                    or c_meta.get("installation_name")
+                    or ""
+                )
+                if scene_label:
+                    dev.scene_name = scene_label
+                    scenes_set.add(scene_label)
+                gid = str(c_meta.get("group_uid") or c_meta.get("group_id") or dev.group_uid)
+                if gid:
+                    dev.group_uid = gid
+
+        # Also infer compositions directly from controller sync state (Master/Slave)
+        master_names_by_group: dict[str, str] = {}
+        for dev in lan_devices:
+            if dev.sync_mode == "master" and dev.group_uid:
+                master_names_by_group[dev.group_uid] = dev.name
+
+        for dev in lan_devices:
+            if dev.group_uid:
+                comp_name = compositions.get(
+                    dev.group_uid,
+                    master_names_by_group.get(dev.group_uid, f"Группа {dev.group_uid[:6]}"),
+                )
+                dev.composition_name = comp_name
+                compositions[dev.group_uid] = comp_name
+
+        return CloudAccountResult(
+            authenticated=cloud_ok,
+            email=email,
+            devices=lan_devices,
+            scenes=sorted(scenes_set),
+            compositions=compositions,
+        )
 
     async def get_gallery_catalog(self) -> list[dict[str, Any]]:
         """Return curated effect gallery templates ready for 2D/3D compilation."""
