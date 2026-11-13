@@ -6,6 +6,26 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+def _safe_int(val: Any, default: int = 0) -> int:
+    """Convert value to int safely even if val is None or empty."""
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    """Convert value to float safely even if val is None or empty."""
+    if val is None or val == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
 @dataclass(slots=True)
 class GestaltInfo:
     """Hardware and profile metadata returned by /xled/v1/gestalt."""
@@ -23,38 +43,67 @@ class GestaltInfo:
     mac: str = ""
     uuid: str = ""
     max_supported_led: int = 0
-    number_of_led: int = 100
+    number_of_led: int = 0
     led_profile: str = "RGB"
     frame_rate: float = 25.0
     measured_frame_rate: float = 25.0
     movie_capacity: int = 0
     wire_type: int = 0
 
+    @property
+    def is_music_dongle(self) -> bool:
+        """Return True if this device is a Twinkly Music USB dongle (TMD01USB)."""
+        pcode = self.product_code.upper()
+        pname = self.product_name.upper()
+        dname = self.device_name.upper()
+        return (
+            self.fw_family.upper() == "M"
+            or pcode.startswith("TMD")
+            or "MUSIC" in pname
+            or "MUSIC" in dname
+            or (self.number_of_led == 0 and pcode != "")
+        )
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> GestaltInfo:
-        """Create GestaltInfo from API response dictionary."""
-        led_profile = str(data.get("led_profile", "RGB")).upper()
-        bytes_per_led = int(data.get("bytes_per_led", 4 if led_profile == "RGBW" else 3))
+        """Create GestaltInfo from API response dictionary (supports LED strings and TMD01USB Music)."""
+        product_code = str(data.get("product_code") or "")
+        fw_family = str(data.get("fw_family") or "G")
+        product_name = str(data.get("product_name") or "Twinkly")
+        is_music = (
+            fw_family.upper() == "M"
+            or product_code.upper().startswith("TMD")
+            or "MUSIC" in product_name.upper()
+        )
+
+        led_profile = str(data.get("led_profile") or ("MUSIC" if is_music else "RGB")).upper()
+        default_leds = 0 if is_music else 100
+        bytes_per_led = _safe_int(
+            data.get("bytes_per_led"), 4 if led_profile == "RGBW" else 3
+        )
         return cls(
-            product_name=str(data.get("product_name", "Twinkly")),
-            hardware_version=str(data.get("hardware_version", "1")),
+            product_name=product_name,
+            hardware_version=str(data.get("hardware_version") or "1"),
             bytes_per_led=bytes_per_led,
-            hw_id=str(data.get("hw_id", "")),
-            flash_size=int(data.get("flash_size", 0)),
-            led_type=int(data.get("led_type", 0)),
-            product_code=str(data.get("product_code", "")),
-            fw_family=str(data.get("fw_family", "G")),
-            device_name=str(data.get("device_name", "Twinkly")),
-            uptime=str(data.get("uptime", "0")),
-            mac=str(data.get("mac", "")).lower(),
-            uuid=str(data.get("uuid", "")),
-            max_supported_led=int(data.get("max_supported_led", 0)),
-            number_of_led=int(data.get("number_of_led", 100)),
+            hw_id=str(data.get("hw_id") or ""),
+            flash_size=_safe_int(data.get("flash_size"), 0),
+            led_type=_safe_int(data.get("led_type"), 0),
+            product_code=product_code,
+            fw_family=fw_family,
+            device_name=str(
+                data.get("device_name")
+                or ("Twinkly Music" if is_music else "Twinkly")
+            ),
+            uptime=str(data.get("uptime") or "0"),
+            mac=str(data.get("mac") or "").lower(),
+            uuid=str(data.get("uuid") or ""),
+            max_supported_led=_safe_int(data.get("max_supported_led"), 0),
+            number_of_led=_safe_int(data.get("number_of_led"), default_leds),
             led_profile=led_profile,
-            frame_rate=float(data.get("frame_rate", 25.0)),
-            measured_frame_rate=float(data.get("measured_frame_rate", 25.0)),
-            movie_capacity=int(data.get("movie_capacity", 0)),
-            wire_type=int(data.get("wire_type", 0)),
+            frame_rate=_safe_float(data.get("frame_rate"), 25.0),
+            measured_frame_rate=_safe_float(data.get("measured_frame_rate"), 25.0),
+            movie_capacity=_safe_int(data.get("movie_capacity"), 0),
+            wire_type=_safe_int(data.get("wire_type"), 0),
         )
 
 
@@ -87,13 +136,15 @@ class SyncInfo:
     def from_dict(cls, data: dict[str, Any]) -> SyncInfo:
         """Parse SyncInfo from API response."""
         sync_block = data.get("sync", data)
-        mode = str(sync_block.get("mode", "none")).lower()
+        if not isinstance(sync_block, dict):
+            return cls()
+        mode = str(sync_block.get("mode") or "none").lower()
         return cls(
             mode=mode,
-            group_uid=str(sync_block.get("group_uid", sync_block.get("uid", ""))),
-            master_uid=str(sync_block.get("master_uid", "")),
-            slave_id=int(sync_block.get("slave_id", 0)),
-            compat_mode=int(sync_block.get("compat_mode", 0)),
+            group_uid=str(sync_block.get("group_uid") or sync_block.get("uid") or ""),
+            master_uid=str(sync_block.get("master_uid") or ""),
+            slave_id=_safe_int(sync_block.get("slave_id"), 0),
+            compat_mode=_safe_int(sync_block.get("compat_mode"), 0),
         )
 
 
@@ -107,8 +158,8 @@ class DeviceBrightness:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DeviceBrightness:
         """Parse brightness from API dict."""
-        mode = str(data.get("mode", "enabled")).lower()
-        val = int(data.get("value", 100))
+        mode = str(data.get("mode") or "enabled").lower()
+        val = _safe_int(data.get("value"), 100)
         return cls(
             enabled=(mode == "enabled"),
             value=max(0, min(100, val)),
@@ -131,13 +182,13 @@ class DeviceColor:
     def from_dict(cls, data: dict[str, Any]) -> DeviceColor:
         """Parse color from API dict."""
         return cls(
-            red=int(data.get("red", 255)),
-            green=int(data.get("green", 255)),
-            blue=int(data.get("blue", 255)),
-            white=int(data.get("white", 0)),
-            hue=int(data.get("hue", 0)),
-            saturation=int(data.get("saturation", 0)),
-            value=int(data.get("value", 255)),
+            red=_safe_int(data.get("red"), 255),
+            green=_safe_int(data.get("green"), 255),
+            blue=_safe_int(data.get("blue"), 255),
+            white=_safe_int(data.get("white"), 0),
+            hue=_safe_int(data.get("hue"), 0),
+            saturation=_safe_int(data.get("saturation"), 0),
+            value=_safe_int(data.get("value"), 255),
         )
 
 
@@ -156,17 +207,17 @@ class MovieEntry:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MovieEntry:
         """Parse movie entry from API dict."""
-        movie_id = int(data.get("id", 0))
-        unique_id = str(data.get("unique_id", f"movie_{movie_id}"))
+        movie_id = _safe_int(data.get("id"), 0)
+        unique_id = str(data.get("unique_id") or f"movie_{movie_id}")
         name = str(data.get("name") or f"Effect #{movie_id}")
         return cls(
             id=movie_id,
             name=name,
             unique_id=unique_id,
-            descriptor_type=str(data.get("descriptor_type", "rgb_raw")),
-            leds_per_frame=int(data.get("leds_per_frame", 0)),
-            frames_number=int(data.get("frames_number", 0)),
-            fps=int(data.get("fps", 20)),
+            descriptor_type=str(data.get("descriptor_type") or "rgb_raw"),
+            leds_per_frame=_safe_int(data.get("leds_per_frame"), 0),
+            frames_number=_safe_int(data.get("frames_number"), 0),
+            fps=_safe_int(data.get("fps"), 20),
         )
 
 
@@ -189,17 +240,21 @@ class MoviesState:
     ) -> MoviesState:
         """Parse MoviesState from /xled/v1/movies and /xled/v1/movies/current."""
         raw_list = movies_data.get("movies", [])
-        entries = [MovieEntry.from_dict(item) for item in raw_list if isinstance(item, dict)]
+        entries = [
+            MovieEntry.from_dict(item)
+            for item in (raw_list or [])
+            if isinstance(item, dict)
+        ]
         curr_id: int | None = None
         curr_uid = ""
-        if current_data and "id" in current_data:
-            curr_id = int(current_data["id"])
-            curr_uid = str(current_data.get("unique_id", ""))
+        if current_data and current_data.get("id") is not None:
+            curr_id = _safe_int(current_data["id"], 0)
+            curr_uid = str(current_data.get("unique_id") or "")
         return cls(
             movies=entries,
-            available_frames=int(movies_data.get("available_frames", 0)),
-            max_capacity=int(movies_data.get("max_capacity", 0)),
-            max_movies=int(movies_data.get("max", 15)),
+            available_frames=_safe_int(movies_data.get("available_frames"), 0),
+            max_capacity=_safe_int(movies_data.get("max_capacity"), 0),
+            max_movies=_safe_int(movies_data.get("max"), 15),
             current_movie_id=curr_id,
             current_movie_unique_id=curr_uid,
         )
@@ -221,12 +276,12 @@ class PlaylistEntry:
         movies_by_uid: dict[str, MovieEntry] | None = None,
     ) -> PlaylistEntry:
         """Parse playlist entry and enrich with movie name if available."""
-        uid = str(data.get("unique_id", ""))
-        duration = int(data.get("duration", 30))
+        uid = str(data.get("unique_id") or "")
+        duration = _safe_int(data.get("duration"), 30)
         movie_id: int | None = data.get("id")
         if movie_id is not None:
-            movie_id = int(movie_id)
-        name = str(data.get("name", ""))
+            movie_id = _safe_int(movie_id, 0)
+        name = str(data.get("name") or "")
         if movies_by_uid and uid in movies_by_uid:
             matched = movies_by_uid[uid]
             movie_id = matched.id
@@ -262,15 +317,15 @@ class PlaylistState:
         raw_entries = playlist_data.get("entries", [])
         entries = [
             PlaylistEntry.from_dict(item, movies_by_uid)
-            for item in raw_entries
+            for item in (raw_entries or [])
             if isinstance(item, dict)
         ]
         curr_id: int | None = None
         curr_uid = ""
         if current_data:
-            if "id" in current_data:
-                curr_id = int(current_data["id"])
-            curr_uid = str(current_data.get("unique_id", ""))
+            if current_data.get("id") is not None:
+                curr_id = _safe_int(current_data["id"], 0)
+            curr_uid = str(current_data.get("unique_id") or "")
         return cls(
             entries=entries,
             current_id=curr_id,
@@ -282,8 +337,8 @@ class PlaylistState:
 class LedCoordinate:
     """Normalized 3D/2D coordinate of a single LED."""
 
-    x: float  # Typically -1.0 .. 1.0 or 0.0 .. 1.0
-    y: float  # Typically -1.0 .. 1.0 or 0.0 .. 1.0
+    x: float
+    y: float
     z: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
@@ -294,9 +349,9 @@ class LedCoordinate:
     def from_dict(cls, data: dict[str, Any]) -> LedCoordinate:
         """Create LedCoordinate from API dict."""
         return cls(
-            x=float(data.get("x", 0.0)),
-            y=float(data.get("y", 0.0)),
-            z=float(data.get("z", 0.0)),
+            x=_safe_float(data.get("x"), 0.0),
+            y=_safe_float(data.get("y"), 0.0),
+            z=_safe_float(data.get("z"), 0.0),
         )
 
 
@@ -312,20 +367,24 @@ class DeviceLayout:
     coordinates: list[LedCoordinate] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], fallback_led_count: int = 100) -> DeviceLayout:
+    def from_dict(
+        cls, data: dict[str, Any], fallback_led_count: int = 100
+    ) -> DeviceLayout:
         """Parse DeviceLayout from API response or generate default linear layout."""
         raw_coords = data.get("coordinates", [])
         coords = [
-            LedCoordinate.from_dict(c) for c in raw_coords if isinstance(c, dict)
+            LedCoordinate.from_dict(c)
+            for c in (raw_coords or [])
+            if isinstance(c, dict)
         ]
         if not coords and fallback_led_count > 0:
             coords = cls.create_default_tree_coordinates(fallback_led_count)
         return cls(
-            source=str(data.get("source", "2d")),
+            source=str(data.get("source") or "2d"),
             synthesized=bool(data.get("synthesized", False)),
-            uuid=str(data.get("uuid", "")),
-            aspect_xy=int(data.get("aspectXY", 0)),
-            aspect_xz=int(data.get("aspectXZ", 0)),
+            uuid=str(data.get("uuid") or ""),
+            aspect_xy=_safe_int(data.get("aspectXY"), 0),
+            aspect_xz=_safe_int(data.get("aspectXZ"), 0),
             coordinates=coords,
         )
 
@@ -335,10 +394,9 @@ class DeviceLayout:
         import math
 
         coords: list[LedCoordinate] = []
-        turns = max(4.0, math.sqrt(num_leds) * 0.6)
+        turns = max(4.0, math.sqrt(max(1, num_leds)) * 0.6)
         for i in range(num_leds):
             t = i / max(1, num_leds - 1)
-            # y goes from bottom (0.0) to top (1.0)
             y = t
             radius = (1.0 - t * 0.85) * 0.85
             angle = t * turns * 2.0 * math.pi
@@ -360,14 +418,14 @@ class MusicDriver:
     @classmethod
     def from_dict(cls, idx: int, data: dict[str, Any]) -> MusicDriver:
         """Parse MusicDriver from /xled/v1/music/drivers."""
-        uid = str(data.get("unique_id", f"driver_{idx}"))
-        driver_id = int(data.get("id", idx))
+        uid = str(data.get("unique_id") or f"driver_{idx}")
+        driver_id = _safe_int(data.get("id"), idx)
         name = str(data.get("name") or f"Music Preset #{driver_id + 1}")
         return cls(
             id=driver_id,
             unique_id=uid,
             name=name,
-            effect_index=int(data.get("effect_index", idx)),
+            effect_index=_safe_int(data.get("effect_index"), idx),
         )
 
 
@@ -394,8 +452,8 @@ class MusicState:
         """Parse MusicState from music API responses."""
         enabled = bool((enabled_data or {}).get("enabled", False))
         active = bool((enabled_data or {}).get("active", enabled))
-        mode = str((enabled_data or {}).get("mode", "manual"))
-        auto_mode = str((enabled_data or {}).get("auto_mode", "off"))
+        mode = str((enabled_data or {}).get("mode") or "manual")
+        auto_mode = str((enabled_data or {}).get("auto_mode") or "off")
 
         drivers: list[MusicDriver] = []
         if drivers_data and isinstance(drivers_data.get("drivers"), list):
@@ -406,9 +464,9 @@ class MusicState:
         curr_id: int | None = None
         curr_uid = ""
         if current_driver_data:
-            if "id" in current_driver_data and current_driver_data["id"] is not None:
-                curr_id = int(current_driver_data["id"])
-            curr_uid = str(current_driver_data.get("unique_id", ""))
+            if current_driver_data.get("id") is not None:
+                curr_id = _safe_int(current_driver_data["id"], 0)
+            curr_uid = str(current_driver_data.get("unique_id") or "")
 
         return cls(
             enabled=enabled,

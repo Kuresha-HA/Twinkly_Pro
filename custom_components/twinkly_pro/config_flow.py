@@ -101,6 +101,8 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
     def _build_entry_title(self, dev: DiscoveredTwinklyDevice) -> str:
         """Build a descriptive ConfigEntry title including composition or LED count."""
         title = dev.name
+        if dev.is_music_dongle:
+            return f"🎵 {title} (Twinkly Music)"
         if dev.composition_name and dev.composition_name != dev.name:
             title = f"{dev.name} [{dev.composition_name}]"
         if dev.number_of_led:
@@ -216,10 +218,8 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
             configured_ids, configured_hosts = self._get_configured_ids_and_hosts()
             self._discovered_devices = {}
             for dev in account_res.devices:
-                if (
-                    dev.unique_id not in configured_ids
-                    and dev.host.lower() not in configured_hosts
-                ):
+                host_Conflict = bool(dev.host) and dev.host.lower() in configured_hosts
+                if dev.unique_id not in configured_ids and not host_Conflict:
                     self._discovered_devices[dev.unique_id] = dev
 
             return await self.async_step_discovery_select()

@@ -9,7 +9,11 @@ from typing import Any
 
 import aiohttp
 
-from .discovery import DiscoveredTwinklyDevice, async_discover_twinkly_devices
+from .discovery import (
+    DiscoveredTwinklyDevice,
+    async_discover_twinkly_devices,
+    async_probe_discovered_host,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -175,8 +179,41 @@ class CloudAccountResult:
     compositions: dict[str, str] = field(default_factory=dict)  # group_uid -> name
 
 
+def _normalize_mac(raw_mac: str) -> str:
+    """Normalize MAC address to lowercase colon-separated aa:bb:cc:dd:ee:ff."""
+    clean = (raw_mac or "").replace(":", "").replace("-", "").strip().lower()
+    if len(clean) == 12:
+        return ":".join(clean[i : i + 2] for i in range(0, 12, 2))
+    return clean
+
+
+def _extract_token(data: Any) -> str | None:
+    """Extract bearer token from Twinkly Cloud /v2/auth response."""
+    if not isinstance(data, dict):
+        return None
+    for key in (
+        "access_token",
+        "authorization_token",
+        "authentication_token",
+        "token",
+        "id_token",
+        "jwt",
+    ):
+        val = data.get(key)
+        if isinstance(val, str) and val:
+            return val
+    # Check nested 'data' or 'user' dict
+    for nested_key in ("data", "result", "auth", "session"):
+        nested = data.get(nested_key)
+        if isinstance(nested, dict):
+            tok = _extract_token(nested)
+            if tok:
+                return tok
+    return None
+
+
 class TwinklyCloudClient:
-    """Client for accessing Twinkly Cloud and merging cloud scenes/groups with LAN discovery."""
+    """Client for accessing Twinkly Cloud (/v2/auth, /v2/devices, /v2/objects) & LAN discovery."""
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
         """Initialize the cloud client."""
@@ -187,7 +224,7 @@ class TwinklyCloudClient:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=4.0)
+                timeout=aiohttp.ClientTimeout(total=5.0)
             )
             self._owns_session = True
         return self._session
@@ -198,75 +235,86 @@ class TwinklyCloudClient:
             await self._session.close()
 
     async def login(self, email: str, password: str) -> bool:
-        """Attempt fast login to Twinkly Cloud account (max 2.5s timeout)."""
+        """Authenticate against https://api.twinkly.com/v2/auth using username + password."""
         if not email or not password:
             return False
         session = await self._ensure_session()
 
         try:
             async with session.post(
-                f"{TWINKLY_CLOUD_BASE}/login",
-                json={"email": email, "password": password},
+                f"{TWINKLY_CLOUD_BASE}/auth",
+                json={"username": email, "password": password},
                 headers={"Accept": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=2.5),
+                timeout=aiohttp.ClientTimeout(total=3.5),
             ) as resp:
-                if resp.status == 200:
+                if resp.status in (200, 201):
                     data = await resp.json(content_type=None)
-                    if isinstance(data, dict):
-                        token = (
-                            data.get("authorization_token")
-                            or data.get("authentication_token")
-                            or data.get("access_token")
-                            or data.get("token")
-                        )
-                        if token:
-                            self._token = str(token)
-                            return True
+                    token = _extract_token(data)
+                    if token:
+                        self._token = token
+                        return True
+                else:
+                    _LOGGER.debug(
+                        "Twinkly Cloud /v2/auth returned HTTP %s", resp.status
+                    )
         except Exception as err:
-            _LOGGER.debug("Twinkly cloud login probe finished: %s", err)
+            _LOGGER.debug("Twinkly cloud /v2/auth error: %s", err)
         return False
 
     async def fetch_cloud_inventory(self) -> dict[str, Any]:
-        """Fetch cloud devices, groups (compositions), and scenes concurrently."""
+        """Fetch /v2/devices, /v2/objects, and /v2/users/me concurrently."""
         if not self._token:
             return {}
         session = await self._ensure_session()
         headers = {
             "Authorization": f"Bearer {self._token}",
-            "X-Auth-Token": self._token,
             "Accept": "application/json",
         }
-        inventory: dict[str, Any] = {"devices": [], "groups": [], "scenes": []}
+        inventory: dict[str, list[dict[str, Any]]] = {
+            "devices": [],
+            "objects": [],
+            "profile": [],
+        }
 
-        async def _fetch_one(key: str, path: str) -> None:
+        async def _fetch_endpoint(bucket: str, path: str) -> None:
             try:
                 async with session.get(
                     f"{TWINKLY_CLOUD_BASE}{path}",
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=2.5),
+                    timeout=aiohttp.ClientTimeout(total=3.5),
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
-                        if isinstance(data, dict):
-                            items = data.get(key) or data.get("data") or []
-                            if isinstance(items, list):
-                                inventory[key].extend(items)
-                        elif isinstance(data, list):
-                            inventory[key].extend(data)
+                        if isinstance(data, list):
+                            inventory[bucket].extend(
+                                [x for x in data if isinstance(x, dict)]
+                            )
+                        elif isinstance(data, dict):
+                            # Could be {"devices": [...]} or {"objects": [...]} or {"data": [...]}
+                            found_list = False
+                            for k in (bucket, "data", "items", "devices", "objects"):
+                                sub = data.get(k)
+                                if isinstance(sub, list):
+                                    inventory[bucket].extend(
+                                        [x for x in sub if isinstance(x, dict)]
+                                    )
+                                    found_list = True
+                            if not found_list:
+                                inventory[bucket].append(data)
             except Exception as err:
-                _LOGGER.debug("Cloud inventory fetch %s skipped: %s", path, err)
+                _LOGGER.debug("Cloud GET %s failed: %s", path, err)
 
         await asyncio.gather(
-            _fetch_one("devices", "/devices"),
-            _fetch_one("groups", "/groups"),
-            _fetch_one("scenes", "/scenes"),
+            _fetch_endpoint("devices", "/devices"),
+            _fetch_endpoint("objects", "/objects"),
+            _fetch_endpoint("profile", "/users/me"),
         )
         return inventory
 
     async def _async_cloud_flow(
         self, email: str, password: str
     ) -> tuple[bool, dict[str, Any]]:
-        """Run cloud login + inventory fetch with a strict short timeout."""
+        """Run cloud login + inventory fetch concurrently with LAN discovery."""
         if not email or not password:
             return False, {}
         ok = await self.login(email, password)
@@ -275,13 +323,176 @@ class TwinklyCloudClient:
         inv = await self.fetch_cloud_inventory()
         return True, inv
 
+    @staticmethod
+    def _parse_cloud_records(
+        cloud_inv: dict[str, Any],
+    ) -> tuple[list[DiscoveredTwinklyDevice], dict[str, str], set[str]]:
+        """Parse cloud /v2/devices and /v2/objects into DiscoveredTwinklyDevice list."""
+        cloud_devices: list[DiscoveredTwinklyDevice] = []
+        compositions: dict[str, str] = {}
+        scenes_set: set[str] = set()
+
+        # 1. Inspect /v2/objects (virtual objects, grouped compositions, scenes, installations)
+        device_to_comp: dict[str, tuple[str, str, str]] = {}  # mac_or_uuid -> (group_uid, comp_name, scene_name)
+        for obj in cloud_inv.get("objects", []):
+            if not isinstance(obj, dict):
+                continue
+            obj_id = str(obj.get("id") or obj.get("uuid") or obj.get("uid") or "")
+            obj_name = str(obj.get("name") or obj.get("title") or "")
+            scene = str(
+                obj.get("scene")
+                or obj.get("room")
+                or obj.get("environment")
+                or obj.get("location")
+                or ""
+            )
+            if scene:
+                scenes_set.add(scene)
+
+            sub_devs = (
+                obj.get("devices")
+                or obj.get("controllers")
+                or obj.get("members")
+                or obj.get("items")
+                or []
+            )
+            if isinstance(sub_devs, list) and len(sub_devs) > 1 and obj_name:
+                gid = obj_id or obj_name
+                compositions[gid] = obj_name
+                for sd in sub_devs:
+                    if isinstance(sd, dict):
+                        smac = _normalize_mac(
+                            str(sd.get("mac") or sd.get("hw_address") or "")
+                        )
+                        suuid = str(sd.get("uuid") or sd.get("id") or "")
+                        if smac:
+                            device_to_comp[smac] = (gid, obj_name, scene)
+                        if suuid:
+                            device_to_comp[suuid] = (gid, obj_name, scene)
+                    elif isinstance(sd, str):
+                        device_to_comp[sd.lower()] = (gid, obj_name, scene)
+
+            # Sometimes /v2/objects entries are the devices themselves
+            if isinstance(sub_devs, list):
+                for sd in sub_devs:
+                    if isinstance(sd, dict):
+                        cloud_inv.setdefault("devices", []).append(sd)
+            elif obj.get("mac") or obj.get("product_code") or obj.get("hw_address"):
+                cloud_inv.setdefault("devices", []).append(obj)
+
+        # Also check profile for nested devices/objects
+        for prof in cloud_inv.get("profile", []):
+            if isinstance(prof, dict):
+                for key in ("devices", "music_devices", "dongles", "objects"):
+                    arr = prof.get(key)
+                    if isinstance(arr, list):
+                        for item in arr:
+                            if isinstance(item, dict):
+                                cloud_inv.setdefault("devices", []).append(item)
+
+        # 2. Parse all physical devices (including Twinkly Music TMD01USB)
+        seen_keys: set[str] = set()
+        for cdev in cloud_inv.get("devices", []):
+            if not isinstance(cdev, dict):
+                continue
+            mac = _normalize_mac(
+                str(
+                    cdev.get("mac")
+                    or cdev.get("hw_address")
+                    or cdev.get("mac_address")
+                    or ""
+                )
+            )
+            uid = str(cdev.get("uuid") or cdev.get("id") or cdev.get("uid") or "")
+            key = mac or uid.lower()
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            pcode = str(
+                cdev.get("product_code")
+                or cdev.get("model")
+                or cdev.get("type")
+                or cdev.get("device_type")
+                or ""
+            )
+            is_music = (
+                pcode.upper().startswith("TMD")
+                or "music" in pcode.lower()
+                or str(cdev.get("fw_family", "")).upper() == "M"
+                or "music" in str(cdev.get("name", "")).lower()
+            )
+            if is_music and not pcode:
+                pcode = "TMD01USB"
+
+            name = str(
+                cdev.get("name")
+                or cdev.get("device_name")
+                or ("Twinkly Music" if is_music else "Twinkly")
+            )
+            leds = int(
+                cdev.get("number_of_led")
+                or cdev.get("led_count")
+                or cdev.get("leds")
+                or 0
+            )
+            profile = str(
+                cdev.get("led_profile") or ("MUSIC" if is_music else "RGB")
+            ).upper()
+            host_ip = str(
+                cdev.get("ip")
+                or cdev.get("local_ip")
+                or cdev.get("ip_address")
+                or cdev.get("host")
+                or ""
+            )
+            scene = str(
+                cdev.get("scene")
+                or cdev.get("room")
+                or cdev.get("installation_name")
+                or ""
+            )
+            group_uid = str(cdev.get("group_uid") or cdev.get("group_id") or "")
+            comp_name = str(cdev.get("group_name") or "")
+            sync_mode = str(cdev.get("sync_mode") or cdev.get("role") or "none").lower()
+
+            comp_info = device_to_comp.get(mac) or device_to_comp.get(uid)
+            if comp_info:
+                group_uid = group_uid or comp_info[0]
+                comp_name = comp_name or comp_info[1]
+                scene = scene or comp_info[2]
+
+            if scene:
+                scenes_set.add(scene)
+            if group_uid and comp_name:
+                compositions[group_uid] = comp_name
+
+            cloud_devices.append(
+                DiscoveredTwinklyDevice(
+                    host=host_ip,
+                    name=name,
+                    mac=mac,
+                    uuid=uid,
+                    product_code=pcode,
+                    number_of_led=leds,
+                    led_profile=profile,
+                    sync_mode=sync_mode,
+                    group_uid=group_uid,
+                    scene_name=scene,
+                    composition_name=comp_name,
+                    source="cloud",
+                )
+            )
+
+        return cloud_devices, compositions, scenes_set
+
     async def async_discover_account_and_lan(
         self,
         email: str = "",
         password: str = "",
         extra_hosts: list[str] | None = None,
     ) -> CloudAccountResult:
-        """Concurrently run Cloud sync and LAN UDP 5555 discovery (< 2.5s total)."""
+        """Concurrently run Cloud sync (/v2/auth, /v2/devices, /v2/objects) and LAN UDP 5555 discovery."""
         session = await self._ensure_session()
 
         (cloud_ok, cloud_inv), lan_devices = await asyncio.gather(
@@ -293,62 +504,60 @@ class TwinklyCloudClient:
             ),
         )
 
-        # Index cloud metadata by MAC / UUID
-        cloud_by_mac: dict[str, dict[str, Any]] = {}
-        cloud_by_uuid: dict[str, dict[str, Any]] = {}
-        compositions: dict[str, str] = {}
-        scenes_set: set[str] = set()
+        cloud_devices, compositions, scenes_set = self._parse_cloud_records(cloud_inv)
 
-        for grp in cloud_inv.get("groups", []):
-            if isinstance(grp, dict):
-                gid = str(grp.get("uid") or grp.get("id") or grp.get("group_uid") or "")
-                gname = str(grp.get("name") or "Композиция Twinkly")
-                if gid:
-                    compositions[gid] = gname
+        # Map LAN devices by MAC and UUID
+        lan_by_mac: dict[str, DiscoveredTwinklyDevice] = {}
+        lan_by_uuid: dict[str, DiscoveredTwinklyDevice] = {}
+        for ldev in lan_devices:
+            if ldev.mac:
+                lan_by_mac[_normalize_mac(ldev.mac)] = ldev
+            if ldev.uuid:
+                lan_by_uuid[ldev.uuid] = ldev
 
-        for sc in cloud_inv.get("scenes", []):
-            if isinstance(sc, dict) and sc.get("name"):
-                scenes_set.add(str(sc["name"]))
+        merged_devices: list[DiscoveredTwinklyDevice] = list(lan_devices)
+        matched_lan_ids: set[str] = set()
 
-        for cdev in cloud_inv.get("devices", []):
-            if not isinstance(cdev, dict):
-                continue
-            cmac = str(cdev.get("mac") or cdev.get("hw_address") or "").lower()
-            cuuid = str(cdev.get("uuid") or cdev.get("id") or "")
-            if cmac:
-                cloud_by_mac[cmac] = cdev
-            if cuuid:
-                cloud_by_uuid[cuuid] = cdev
+        for cdev in cloud_devices:
+            matched_lan = (
+                lan_by_mac.get(_normalize_mac(cdev.mac))
+                if cdev.mac
+                else None
+            ) or (lan_by_uuid.get(cdev.uuid) if cdev.uuid else None)
 
-        # Enrich LAN-discovered devices with Cloud scene & composition metadata
-        for dev in lan_devices:
-            c_meta = cloud_by_mac.get(dev.mac.lower()) or cloud_by_uuid.get(dev.uuid)
-            if c_meta:
-                dev.source = "cloud+lan"
-                if c_meta.get("name"):
-                    dev.name = str(c_meta["name"])
-                scene_label = str(
-                    c_meta.get("scene")
-                    or c_meta.get("room")
-                    or c_meta.get("installation_name")
-                    or ""
-                )
-                if scene_label:
-                    dev.scene_name = scene_label
-                    scenes_set.add(scene_label)
-                gid = str(
-                    c_meta.get("group_uid") or c_meta.get("group_id") or dev.group_uid
-                )
-                if gid:
-                    dev.group_uid = gid
+            if matched_lan:
+                matched_lan_ids.add(matched_lan.unique_id)
+                matched_lan.source = "cloud+lan"
+                if cdev.name and matched_lan.name in ("Twinkly", ""):
+                    matched_lan.name = cdev.name
+                if cdev.scene_name:
+                    matched_lan.scene_name = cdev.scene_name
+                if cdev.composition_name:
+                    matched_lan.composition_name = cdev.composition_name
+                if cdev.group_uid and not matched_lan.group_uid:
+                    matched_lan.group_uid = cdev.group_uid
+            else:
+                # Device exists in Twinkly Cloud (e.g. Twinkly Music or device that didn't reply to UDP broadcast)
+                # If cloud has a known IP or mDNS name, try a quick probe
+                if cdev.host:
+                    probed = await async_probe_discovered_host(
+                        cdev.host, session=session, fallback_name=cdev.name
+                    )
+                    if probed:
+                        probed.source = "cloud+lan"
+                        probed.scene_name = cdev.scene_name
+                        probed.composition_name = cdev.composition_name
+                        merged_devices.append(probed)
+                        continue
+                merged_devices.append(cdev)
 
-        # Infer compositions directly from controller sync state (Master/Slave)
+        # Also infer compositions from controller Master/Slave sync state on LAN
         master_names_by_group: dict[str, str] = {}
-        for dev in lan_devices:
+        for dev in merged_devices:
             if dev.sync_mode == "master" and dev.group_uid:
                 master_names_by_group[dev.group_uid] = dev.name
 
-        for dev in lan_devices:
+        for dev in merged_devices:
             if dev.group_uid:
                 comp_name = compositions.get(
                     dev.group_uid,
@@ -362,7 +571,7 @@ class TwinklyCloudClient:
         return CloudAccountResult(
             authenticated=cloud_ok,
             email=email,
-            devices=lan_devices,
+            devices=merged_devices,
             scenes=sorted(scenes_set),
             compositions=compositions,
         )

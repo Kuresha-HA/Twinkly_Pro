@@ -265,8 +265,14 @@ class TwinklyClient:
 
     async def get_mode(self) -> str:
         """Get current operating mode (off, color, movie, playlist, music, rt, demo)."""
-        data = await self._request("GET", "led/mode")
-        return str(data.get("mode", "off")).lower()
+        try:
+            data = await self._request("GET", "led/mode")
+            return str(data.get("mode", "off")).lower()
+        except TwinklyError:
+            # Twinkly Music dongle (TMD01USB) does not have /xled/v1/led/mode
+            if self._cached_gestalt and self._cached_gestalt.is_music_dongle:
+                return "music"
+            return "off"
 
     async def set_mode(self, mode: str, effect_id: int | None = None) -> None:
         """Set device operating mode."""

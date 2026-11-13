@@ -1,4 +1,4 @@
-"""DataUpdateCoordinator for Twinkly Pro devices with Master/Slave group routing."""
+"""DataUpdateCoordinator for Twinkly Pro devices with Master/Slave group routing and Cloud offline resilience."""
 
 from __future__ import annotations
 
@@ -11,14 +11,29 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .const import DEFAULT_SCAN_INTERVAL, DOMAIN
+from .const import (
+    CONF_DEVICE_NAME,
+    CONF_GROUP_UID,
+    CONF_HOST,
+    CONF_LED_PROFILE,
+    CONF_MAC,
+    CONF_NUM_LEDS,
+    CONF_PRODUCT_CODE,
+    DEFAULT_SCAN_INTERVAL,
+    DOMAIN,
+)
 from .twinkly_client import (
+    DeviceLayout,
+    GestaltInfo,
+    SyncInfo,
     TwinklyClient,
     TwinklyDeviceSnapshot,
     TwinklyError,
     TwinklyRealtimeStreamer,
+    async_discover_lan_hosts,
+    async_probe_discovered_host,
     compile_custom_frames_movie,
     compile_procedural_movie,
 )
@@ -39,50 +54,92 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         self.entry = entry
         self.host = host
         session = async_get_clientsession(hass)
-        self.client = TwinklyClient(host=host, session=session)
+        self.client = TwinklyClient(host=host or "127.0.0.1", session=session)
         self.streamer = TwinklyRealtimeStreamer(self.client)
 
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN}_{host}",
+            name=f"{DOMAIN}_{entry.unique_id or host}",
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+        )
+
+    def _build_offline_snapshot(self) -> TwinklyDeviceSnapshot:
+        """Build a fallback snapshot from ConfigEntry metadata when a Cloud device is unplugged/offline."""
+        d = self.entry.data
+        leds = int(d.get(CONF_NUM_LEDS, 0))
+        pcode = str(d.get(CONF_PRODUCT_CODE, ""))
+        profile = str(d.get(CONF_LED_PROFILE, "RGB"))
+        name = str(d.get(CONF_DEVICE_NAME, "Twinkly"))
+        mac = str(d.get(CONF_MAC, ""))
+        group_uid = str(d.get(CONF_GROUP_UID, ""))
+
+        gestalt = GestaltInfo(
+            product_name="Twinkly Music" if pcode.upper().startswith("TMD") else "Twinkly",
+            product_code=pcode,
+            device_name=name,
+            mac=mac,
+            uuid=self.entry.unique_id or mac,
+            number_of_led=leds,
+            led_profile=profile,
+            bytes_per_led=4 if profile == "RGBW" else 3,
+        )
+        sync = SyncInfo(
+            mode="master" if group_uid else "none",
+            group_uid=group_uid,
+        )
+        layout = DeviceLayout(
+            source="3d",
+            synthesized=True,
+            coordinates=DeviceLayout.create_default_tree_coordinates(leds) if leds > 0 else [],
+        )
+        return TwinklyDeviceSnapshot(
+            host=self.host,
+            gestalt=gestalt,
+            fw_version="offline",
+            mode="off",
+            sync=sync,
+            layout=layout,
+            online=False,
         )
 
     @property
     def device_info(self) -> DeviceInfo:
-        """Return Home Assistant DeviceInfo for this Twinkly controller."""
+        """Return Home Assistant DeviceInfo for this Twinkly controller or Music dongle."""
         snap = self.data
-        mac = snap.gestalt.mac if snap else self.entry.data.get("mac", self.host)
+        mac = (
+            snap.gestalt.mac
+            if snap and snap.gestalt.mac
+            else self.entry.data.get(CONF_MAC, self.entry.unique_id or self.host)
+        )
         name = (
             snap.gestalt.device_name
-            if snap
-            else self.entry.data.get("device_name", f"Twinkly ({self.host})")
+            if snap and snap.gestalt.device_name
+            else self.entry.data.get(CONF_DEVICE_NAME, f"Twinkly ({self.host})")
         )
-        model = (
-            f"{snap.gestalt.product_code} ({snap.gestalt.number_of_led} {snap.gestalt.led_profile})"
-            if snap
-            else "Twinkly Smart LED"
-        )
+        if snap and snap.gestalt.is_music_dongle:
+            model = f"Twinkly Music Dongle ({snap.gestalt.product_code or 'TMD01USB'})"
+        elif snap:
+            model = f"{snap.gestalt.product_code or 'Twinkly'} ({snap.gestalt.number_of_led} {snap.gestalt.led_profile})"
+        else:
+            model = "Twinkly Smart LED"
+
         sw_version = snap.fw_version if snap else "unknown"
         scene_area = self.entry.data.get("scene_name") or None
+        config_url = f"http://{self.host}" if self.host else None
 
         return DeviceInfo(
-            identifiers={(DOMAIN, mac)},
+            identifiers={(DOMAIN, str(mac).lower())},
             name=name,
             manufacturer="Twinkly (Ledworks)",
             model=model,
             sw_version=sw_version,
             suggested_area=scene_area,
-            configuration_url=f"http://{self.host}",
+            configuration_url=config_url,
         )
 
     def get_target_coordinator(self) -> TwinklyProCoordinator:
-        """Return the Master coordinator if this device is a Slave in a synced group.
-
-        Ensures commands sent to a Slave device are routed to its Master controller
-        so the group never loses synchronization.
-        """
+        """Return the Master coordinator if this device is a Slave in a synced group."""
         if not self.data or not self.data.sync.is_slave:
             return self
 
@@ -107,15 +164,53 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
 
         return self
 
+    async def _async_try_resolve_missing_host(self) -> bool:
+        """Attempt to find local IP via UDP 5555 broadcast if device was added from Cloud without IP."""
+        target_mac = str(self.entry.data.get(CONF_MAC, "")).lower()
+        target_name = str(self.entry.data.get(CONF_DEVICE_NAME, "")).lower()
+        lan_hosts = await async_discover_lan_hosts(timeout=1.0)
+        session = async_get_clientsession(self.hass)
+
+        for ip, adv_name in lan_hosts.items():
+            if target_name and adv_name.lower() == target_name:
+                self.update_host(ip)
+                return True
+            probed = await async_probe_discovered_host(ip, session=session)
+            if probed and target_mac and probed.unique_id == target_mac:
+                self.update_host(ip)
+                return True
+        return False
+
+    def update_host(self, new_host: str) -> None:
+        """Update device IP address dynamically when discovered on LAN."""
+        if not new_host or new_host == self.host:
+            return
+        self.host = new_host
+        session = async_get_clientsession(self.hass)
+        self.client = TwinklyClient(host=new_host, session=session)
+        self.streamer = TwinklyRealtimeStreamer(self.client)
+        new_data = dict(self.entry.data)
+        new_data[CONF_HOST] = new_host
+        self.hass.config_entries.async_update_entry(self.entry, data=new_data)
+
     async def _async_update_data(self) -> TwinklyDeviceSnapshot:
-        """Fetch latest device state from the Twinkly controller."""
+        """Fetch latest device state from the Twinkly controller (gracefully handles offline Cloud devices)."""
+        if not self.host:
+            resolved = await self._async_try_resolve_missing_host()
+            if not resolved:
+                return self._build_offline_snapshot()
+
         try:
             snapshot = await self.client.fetch_full_snapshot()
             snapshot.is_rt_streaming = self.streamer.is_streaming
             snapshot.active_rt_preset = self.streamer.active_preset
             return snapshot
-        except TwinklyError as err:
-            raise UpdateFailed(f"Error communicating with Twinkly at {self.host}: {err}") from err
+        except TwinklyError:
+            # Return offline snapshot with cached metadata instead of crashing setup
+            if self.data is not None:
+                self.data.online = False
+                return self.data
+            return self._build_offline_snapshot()
 
     async def async_shutdown(self) -> None:
         """Clean up active UDP streams when unloading."""
@@ -128,6 +223,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     async def async_set_mode(self, mode: str) -> None:
         """Set operating mode (routes to Master if device is Slave)."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         if mode != "rt" and target.streamer.is_streaming:
             await target.streamer.stop()
         await target.client.set_mode(mode)
@@ -138,6 +235,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     async def async_set_brightness(self, value_0_100: int) -> None:
         """Set brightness 0..100 (routes to Master if device is Slave)."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         await target.client.set_brightness(value_0_100, enabled=True)
         await target.async_request_refresh()
 
@@ -150,6 +249,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     ) -> None:
         """Set static RGB/RGBW color (routes to Master if device is Slave)."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         if target.streamer.is_streaming:
             await target.streamer.stop()
         await target.client.set_color(
@@ -164,6 +265,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     async def async_select_movie(self, movie_id: int) -> None:
         """Activate a movie stored in flash memory."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         if target.streamer.is_streaming:
             await target.streamer.stop()
         await target.client.set_current_movie(movie_id, switch_mode=True)
@@ -172,6 +275,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     async def async_select_playlist_item(self, item_id: int) -> None:
         """Activate a specific playlist entry by index."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         if target.streamer.is_streaming:
             await target.streamer.stop()
         await target.client.set_current_playlist_item(item_id)
@@ -181,7 +286,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         """Advance to the next (+1) or previous (-1) playlist item or movie."""
         target = self.get_target_coordinator()
         snap = target.data
-        if not snap:
+        if not snap or not target.host:
             return
 
         if snap.mode == "playlist" and snap.playlist.entries:
@@ -197,9 +302,13 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             next_id = ids[(curr_pos + step) % len(ids)]
             await target.async_select_movie(next_id)
 
-    async def async_select_music_driver(self, driver_id: int, unique_id: str = "") -> None:
+    async def async_select_music_driver(
+        self, driver_id: int, unique_id: str = ""
+    ) -> None:
         """Select a Twinkly Music driver and switch to music mode."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         if target.streamer.is_streaming:
             await target.streamer.stop()
         await target.client.set_music_driver(
@@ -215,14 +324,18 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         fps: int = 25,
         params: dict[str, Any] | None = None,
     ) -> None:
-        """Start live UDP Real-Time procedural streaming on this controller (and slaves if master)."""
+        """Start live UDP Real-Time procedural streaming on this controller."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         await target.streamer.start_effect_stream(preset=preset, fps=fps, params=params)
         await target.async_request_refresh()
 
     async def async_stop_rt_effect(self, restore_mode: str = "movie") -> None:
         """Stop live UDP Real-Time streaming."""
         target = self.get_target_coordinator()
+        if not target.host:
+            return
         await target.streamer.stop(restore_mode=restore_mode)
         await target.async_request_refresh()
 

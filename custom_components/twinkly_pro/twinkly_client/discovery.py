@@ -21,7 +21,7 @@ DISCOVERY_PAYLOAD = b"\x01discover"
 
 @dataclass(slots=True)
 class DiscoveredTwinklyDevice:
-    """Represents a Twinkly device discovered via LAN UDP broadcast or Cloud."""
+    """Represents a Twinkly device (LED string or Twinkly Music dongle) discovered via LAN or Cloud."""
 
     host: str
     name: str
@@ -41,14 +41,33 @@ class DiscoveredTwinklyDevice:
     @property
     def unique_id(self) -> str:
         """Return canonical unique_id (MAC address or UUID)."""
+        clean_mac = self.mac.replace(":", "").replace("-", "").lower()
+        if clean_mac and len(clean_mac) == 12:
+            # Format as standard colon-separated lowercase MAC
+            return ":".join(clean_mac[i : i + 2] for i in range(0, 12, 2))
         return (self.mac or self.uuid or self.host).lower()
+
+    @property
+    def is_music_dongle(self) -> bool:
+        """Return True if this device is a Twinkly Music USB dongle (TMD01USB)."""
+        pcode = self.product_code.upper()
+        return (
+            pcode.startswith("TMD")
+            or self.led_profile.upper() == "MUSIC"
+            or "music" in self.name.lower()
+        )
 
     @property
     def display_label(self) -> str:
         """Return human-readable label for ConfigFlow multi-select."""
-        parts = [f"{self.name}"]
-        if self.number_of_led:
+        prefix = f"🎵 {self.name}" if self.is_music_dongle else self.name
+        parts = [prefix]
+
+        if self.is_music_dongle:
+            parts.append("Twinkly Music")
+        elif self.number_of_led:
             parts.append(f"{self.number_of_led} {self.led_profile}")
+
         if self.product_code:
             parts.append(self.product_code)
         if self.scene_name:
@@ -56,8 +75,13 @@ class DiscoveredTwinklyDevice:
         if self.sync_mode in ("master", "slave") and self.group_uid:
             comp = self.composition_name or f"Группа {self.group_uid[:6]}"
             parts.append(f"[{comp}: {self.sync_mode.upper()}]")
+        elif self.composition_name:
+            parts.append(f"[{self.composition_name}]")
+
         if self.host:
             parts.append(f"IP: {self.host}")
+        else:
+            parts.append("Из облака (ожидает включения в сеть)")
         return " • ".join(parts)
 
 
@@ -68,13 +92,7 @@ class _TwinklyDiscoveryProtocol(asyncio.DatagramProtocol):
         self.found_hosts: dict[str, str] = {}  # host -> advertised_name
 
     def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
-        """Parse UDP discovery response packet from a Twinkly device.
-
-        Response format:
-        - Bytes 0..3: IP octets in reverse order
-        - Bytes 4..5: b'OK'
-        - Bytes 6..N: Null-terminated device name string
-        """
+        """Parse UDP discovery response packet from a Twinkly device."""
         host_ip = str(addr[0])
         if len(data) >= 6 and data[4:6] == b"OK":
             raw_name = data[6:].split(b"\x00", 1)[0]
@@ -112,11 +130,12 @@ async def async_discover_lan_hosts(timeout: float = 1.6) -> dict[str, str]:
         return {}
 
     try:
-        # Send 3 broadcast bursts to maximize UDP reception across Wi-Fi
         intervals = [0.4, 0.5, max(0.2, timeout - 0.9)]
         for wait_sec in intervals:
             try:
-                transport.sendto(DISCOVERY_PAYLOAD, ("255.255.255.255", DISCOVERY_UDP_PORT))
+                transport.sendto(
+                    DISCOVERY_PAYLOAD, ("255.255.255.255", DISCOVERY_UDP_PORT)
+                )
             except OSError as err:
                 _LOGGER.debug("UDP broadcast sendto failed: %s", err)
             await asyncio.sleep(wait_sec)
@@ -132,16 +151,17 @@ async def async_probe_discovered_host(
     fallback_name: str = "Twinkly",
 ) -> DiscoveredTwinklyDevice | None:
     """Query /xled/v1/gestalt and /xled/v1/sync on a discovered IP address."""
-    client = TwinklyClient(host=host, session=session, timeout=4.0)
+    client = TwinklyClient(host=host, session=session, timeout=3.5)
     try:
         gestalt: GestaltInfo = await client.get_gestalt(force_refresh=True)
         fw_ver = await client.get_firmware_version(force_refresh=True)
         sync: SyncInfo = SyncInfo()
-        try:
-            await client.authenticate()
-            sync = await client.get_sync()
-        except TwinklyError:
-            pass
+        if not gestalt.is_music_dongle:
+            try:
+                await client.authenticate()
+                sync = await client.get_sync()
+            except TwinklyError:
+                pass
 
         return DiscoveredTwinklyDevice(
             host=host,
@@ -167,9 +187,9 @@ async def async_probe_discovered_host(
 async def async_discover_twinkly_devices(
     session: aiohttp.ClientSession | None = None,
     extra_hosts: list[str] | None = None,
-    timeout: float = 1.6,
+    timeout: float = 1.4,
 ) -> list[DiscoveredTwinklyDevice]:
-    """Discover all active Twinkly controllers on the local network and probe their metadata."""
+    """Discover all active Twinkly controllers and Music dongles on the local network."""
     lan_hosts = await async_discover_lan_hosts(timeout=timeout)
     for h in extra_hosts or []:
         if h and h not in lan_hosts:

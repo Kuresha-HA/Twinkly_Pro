@@ -17,6 +17,7 @@ from custom_components.twinkly_pro.twinkly_client import (
     PlaylistState,
     SyncInfo,
     TwinklyClient,
+    TwinklyCloudClient,
     TwinklyRealtimeStreamer,
     compile_custom_frames_movie,
     compile_procedural_movie,
@@ -312,4 +313,52 @@ def test_discovered_device_display_label_with_scene_and_composition() -> None:
     assert "Сцена: Гостиная" in label
     assert "[Штора Окно: MASTER]" in label
     assert "IP: 192.168.1.145" in label
+
+
+def test_twinkly_music_dongle_gestalt_and_cloud_parsing() -> None:
+    """Verify Twinkly Music dongle (TMD01USB) parses cleanly even with null LED fields and from Cloud."""
+    music_gestalt = GestaltInfo.from_dict(
+        {
+            "product_name": "Twinkly Music",
+            "product_code": "TMD01USB",
+            "fw_family": "M",
+            "device_name": "Music Dongle",
+            "mac": "40:4C:CA:AA:BB:CC",
+            "uuid": "uuid-music-1",
+            "number_of_led": None,
+            "led_profile": None,
+            "frame_rate": None,
+        }
+    )
+    assert music_gestalt.is_music_dongle is True
+    assert music_gestalt.number_of_led == 0
+    assert music_gestalt.led_profile == "MUSIC"
+
+    cloud_inv = {
+        "devices": [
+            {
+                "name": "Curtain-400",
+                "mac": "404cca112233",
+                "uuid": "uuid-curtain",
+                "product_code": "TWW400SPP",
+                "number_of_led": 400,
+            },
+            {
+                "name": "My Twinkly Music",
+                "mac": "404ccaaabbcc",
+                "uuid": "uuid-music-1",
+                "product_code": "TMD01USB",
+                "fw_family": "M",
+            },
+        ],
+        "objects": [],
+        "profile": [],
+    }
+    devs, _, _ = TwinklyCloudClient._parse_cloud_records(cloud_inv)
+    assert len(devs) == 2
+    music_dev = next(d for d in devs if d.is_music_dongle)
+    assert music_dev.name == "My Twinkly Music"
+    assert "🎵 My Twinkly Music" in music_dev.display_label
+    assert "Twinkly Music" in music_dev.display_label
+
 
