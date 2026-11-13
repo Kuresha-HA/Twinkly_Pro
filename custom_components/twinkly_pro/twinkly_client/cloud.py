@@ -311,6 +311,17 @@ class TwinklyCloudClient:
             _fetch_endpoint("objects", "/objects"),
             _fetch_endpoint("profile", "/users/me"),
         )
+        try:
+            import json as _json
+
+            _LOGGER.warning(
+                "[TWINKLY CLOUD DIAGNOSTIC] devices=%s | objects=%s | profile=%s",
+                _json.dumps(inventory.get("devices", []), ensure_ascii=False, default=str),
+                _json.dumps(inventory.get("objects", []), ensure_ascii=False, default=str),
+                _json.dumps(inventory.get("profile", []), ensure_ascii=False, default=str),
+            )
+        except Exception:
+            pass
         return inventory
 
     async def _async_cloud_flow(
@@ -561,6 +572,12 @@ class TwinklyCloudClient:
         lan_only_devices = [
             ldev for ldev in lan_devices if ldev.unique_id not in matched_lan_ids
         ]
+        _LOGGER.warning(
+            "[TWINKLY LAN DIAGNOSTIC] lan_devices=%s | cloud_matched=%s | lan_only=%s",
+            [(d.name, d.host, d.mac, d.uuid, d.product_code) for d in lan_devices],
+            list(matched_lan_ids),
+            [(d.name, d.host, d.mac, d.uuid, d.product_code) for d in lan_only_devices],
+        )
         merged_devices = final_cloud_devices + lan_only_devices
 
         # Also infer compositions from controller Master/Slave sync state on LAN
