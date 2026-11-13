@@ -126,13 +126,51 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
             )
 
-        await self.async_set_unique_id(primary.unique_id)
+        await self.async_set_unique_id(primary.unique_id, raise_on_progress=False)
         self._abort_if_unique_id_configured(updates={CONF_HOST: primary.host})
 
         return self.async_create_entry(
             title=self._build_entry_title(primary),
             data=self._build_entry_data(primary),
         )
+
+    def _clear_stale_flows(self) -> None:
+        """Abort any stale or interrupted config flows for this domain so user is never blocked."""
+        for progress in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+            flow_id = progress.get("flow_id")
+            if flow_id and flow_id != self.flow_id:
+                try:
+                    self.hass.config_entries.flow.async_abort(flow_id)
+                except Exception:
+                    pass
+
+    def _collect_ha_discovered_hosts(self) -> list[str]:
+        """Collect any hosts already seen by HA Zeroconf/DHCP or existing Twinkly entries."""
+        extra_hosts: list[str] = []
+        # 1. Check public flow progress context dictionaries
+        for progress in self.hass.config_entries.flow.async_progress():
+            ctx = progress.get("context", {})
+            for key in ("host", "ip"):
+                val = ctx.get(key)
+                if isinstance(val, str) and val and val not in extra_hosts:
+                    extra_hosts.append(val)
+
+        # 2. Check internal flow objects (e.g. official 'twinkly' zeroconf flow holding _host)
+        raw_progress = getattr(self.hass.config_entries.flow, "_progress", {})
+        if isinstance(raw_progress, dict):
+            for flow_obj in raw_progress.values():
+                for attr in ("_host", "_discovered_host", "host"):
+                    val = getattr(flow_obj, attr, None)
+                    if isinstance(val, str) and val and val not in extra_hosts:
+                        extra_hosts.append(val)
+
+        # 3. Check any existing core 'twinkly' config entries
+        for entry in self.hass.config_entries.async_entries("twinkly"):
+            h = entry.data.get("host") or entry.data.get("ip")
+            if isinstance(h, str) and h and h not in extra_hosts:
+                extra_hosts.append(h)
+
+        return extra_hosts
 
     # -------------------------------------------------------------------------
     # STEP 1: Twinkly Cloud Login (Default initial step, skippable)
@@ -142,6 +180,9 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Step 1: Prompt for Twinkly Cloud credentials (with option to skip)."""
+        # Clean up any previously interrupted flow so user never gets 'already_in_progress'
+        self._clear_stale_flows()
+
         if user_input is not None:
             skip_cloud = bool(user_input.get(CONF_SKIP_CLOUD, False))
             email = str(user_input.get(CONF_CLOUD_EMAIL, "")).strip()
@@ -154,11 +195,13 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._cloud_email = ""
                 self._cloud_password = ""
 
+            extra_hosts = self._collect_ha_discovered_hosts()
             session = async_get_clientsession(self.hass)
             cloud_client = TwinklyCloudClient(session=session)
             account_res = await cloud_client.async_discover_account_and_lan(
                 email=self._cloud_email,
                 password=self._cloud_password,
+                extra_hosts=extra_hosts,
             )
             self._cloud_authenticated = account_res.authenticated
             self._scenes_summary = (
@@ -309,7 +352,7 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         mac = str(import_data.get(CONF_MAC, "")).lower()
         host = str(import_data.get(CONF_HOST, ""))
         unique_id = mac or host
-        await self.async_set_unique_id(unique_id)
+        await self.async_set_unique_id(unique_id, raise_on_progress=False)
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         name = str(import_data.get(CONF_DEVICE_NAME, "Twinkly"))
@@ -337,6 +380,7 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         self._single_discovered = probed
+        self.context["host"] = host
         self.context["title_placeholders"] = {
             "name": f"{probed.name} ({probed.number_of_led} LED)"
         }

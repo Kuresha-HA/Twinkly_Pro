@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 import logging
 from typing import Any
@@ -12,10 +13,7 @@ from .discovery import DiscoveredTwinklyDevice, async_discover_twinkly_devices
 
 _LOGGER = logging.getLogger(__name__)
 
-TWINKLY_CLOUD_ENDPOINTS: list[str] = [
-    "https://api.twinkly.com/v2",
-    "https://api.twinkly.com/v1",
-]
+TWINKLY_CLOUD_BASE = "https://api.twinkly.com/v2"
 
 # Rich curated effect gallery templates available offline and online
 CURATED_GALLERY_TEMPLATES: list[dict[str, Any]] = [
@@ -185,12 +183,11 @@ class TwinklyCloudClient:
         self._session = session
         self._owns_session = session is None
         self._token: str | None = None
-        self._active_base: str = TWINKLY_CLOUD_ENDPOINTS[0]
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=8.0)
+                timeout=aiohttp.ClientTimeout(total=4.0)
             )
             self._owns_session = True
         return self._session
@@ -201,44 +198,36 @@ class TwinklyCloudClient:
             await self._session.close()
 
     async def login(self, email: str, password: str) -> bool:
-        """Attempt login to Twinkly Cloud account."""
+        """Attempt fast login to Twinkly Cloud account (max 2.5s timeout)."""
         if not email or not password:
             return False
         session = await self._ensure_session()
 
-        for base_url in TWINKLY_CLOUD_ENDPOINTS:
-            for path in ("/login", "/auth/login", "/users/login"):
-                try:
-                    async with session.post(
-                        f"{base_url}{path}",
-                        json={"email": email, "password": password},
-                        headers={"Accept": "application/json"},
-                        timeout=aiohttp.ClientTimeout(total=6.0),
-                    ) as resp:
-                        if resp.status == 200:
-                            data = await resp.json(content_type=None)
-                            if isinstance(data, dict):
-                                token = (
-                                    data.get("authorization_token")
-                                    or data.get("authentication_token")
-                                    or data.get("access_token")
-                                    or data.get("token")
-                                )
-                                if token:
-                                    self._token = str(token)
-                                    self._active_base = base_url
-                                    return True
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Twinkly cloud login probe %s%s failed: %s",
-                        base_url,
-                        path,
-                        err,
-                    )
+        try:
+            async with session.post(
+                f"{TWINKLY_CLOUD_BASE}/login",
+                json={"email": email, "password": password},
+                headers={"Accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=2.5),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    if isinstance(data, dict):
+                        token = (
+                            data.get("authorization_token")
+                            or data.get("authentication_token")
+                            or data.get("access_token")
+                            or data.get("token")
+                        )
+                        if token:
+                            self._token = str(token)
+                            return True
+        except Exception as err:
+            _LOGGER.debug("Twinkly cloud login probe finished: %s", err)
         return False
 
     async def fetch_cloud_inventory(self) -> dict[str, Any]:
-        """Fetch cloud devices, groups (compositions), and scenes if authenticated."""
+        """Fetch cloud devices, groups (compositions), and scenes concurrently."""
         if not self._token:
             return {}
         session = await self._ensure_session()
@@ -249,17 +238,12 @@ class TwinklyCloudClient:
         }
         inventory: dict[str, Any] = {"devices": [], "groups": [], "scenes": []}
 
-        for key, path in (
-            ("devices", "/devices"),
-            ("groups", "/groups"),
-            ("scenes", "/scenes"),
-            ("scenes", "/installations"),
-        ):
+        async def _fetch_one(key: str, path: str) -> None:
             try:
                 async with session.get(
-                    f"{self._active_base}{path}",
+                    f"{TWINKLY_CLOUD_BASE}{path}",
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=6.0),
+                    timeout=aiohttp.ClientTimeout(total=2.5),
                 ) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
@@ -272,7 +256,24 @@ class TwinklyCloudClient:
             except Exception as err:
                 _LOGGER.debug("Cloud inventory fetch %s skipped: %s", path, err)
 
+        await asyncio.gather(
+            _fetch_one("devices", "/devices"),
+            _fetch_one("groups", "/groups"),
+            _fetch_one("scenes", "/scenes"),
+        )
         return inventory
+
+    async def _async_cloud_flow(
+        self, email: str, password: str
+    ) -> tuple[bool, dict[str, Any]]:
+        """Run cloud login + inventory fetch with a strict short timeout."""
+        if not email or not password:
+            return False, {}
+        ok = await self.login(email, password)
+        if not ok:
+            return False, {}
+        inv = await self.fetch_cloud_inventory()
+        return True, inv
 
     async def async_discover_account_and_lan(
         self,
@@ -280,20 +281,16 @@ class TwinklyCloudClient:
         password: str = "",
         extra_hosts: list[str] | None = None,
     ) -> CloudAccountResult:
-        """Authenticate with Cloud (if credentials given), scan LAN via UDP 5555, and merge."""
+        """Concurrently run Cloud sync and LAN UDP 5555 discovery (< 2.5s total)."""
         session = await self._ensure_session()
-        cloud_ok = False
-        cloud_inv: dict[str, Any] = {}
 
-        if email and password:
-            cloud_ok = await self.login(email, password)
-            if cloud_ok:
-                cloud_inv = await self.fetch_cloud_inventory()
-
-        # Always run fast UDP 5555 LAN broadcast discovery to locate live controllers & compositions
-        lan_devices = await async_discover_twinkly_devices(
-            session=session,
-            extra_hosts=extra_hosts,
+        (cloud_ok, cloud_inv), lan_devices = await asyncio.gather(
+            self._async_cloud_flow(email, password),
+            async_discover_twinkly_devices(
+                session=session,
+                extra_hosts=extra_hosts,
+                timeout=1.4,
+            ),
         )
 
         # Index cloud metadata by MAC / UUID
@@ -339,11 +336,13 @@ class TwinklyCloudClient:
                 if scene_label:
                     dev.scene_name = scene_label
                     scenes_set.add(scene_label)
-                gid = str(c_meta.get("group_uid") or c_meta.get("group_id") or dev.group_uid)
+                gid = str(
+                    c_meta.get("group_uid") or c_meta.get("group_id") or dev.group_uid
+                )
                 if gid:
                     dev.group_uid = gid
 
-        # Also infer compositions directly from controller sync state (Master/Slave)
+        # Infer compositions directly from controller sync state (Master/Slave)
         master_names_by_group: dict[str, str] = {}
         for dev in lan_devices:
             if dev.sync_mode == "master" and dev.group_uid:
@@ -353,7 +352,9 @@ class TwinklyCloudClient:
             if dev.group_uid:
                 comp_name = compositions.get(
                     dev.group_uid,
-                    master_names_by_group.get(dev.group_uid, f"Группа {dev.group_uid[:6]}"),
+                    master_names_by_group.get(
+                        dev.group_uid, f"Группа {dev.group_uid[:6]}"
+                    ),
                 )
                 dev.composition_name = comp_name
                 compositions[dev.group_uid] = comp_name
