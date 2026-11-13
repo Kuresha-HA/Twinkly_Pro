@@ -33,7 +33,9 @@ from .const import (
     CONF_NUM_LEDS,
     CONF_PRODUCT_CODE,
     CONF_SCENE_NAME,
+    CONF_SELECTED_CLOUD_DEVICES,
     CONF_SELECTED_DEVICES,
+    CONF_SELECTED_LAN_DEVICES,
     CONF_SKIP_CLOUD,
     CONF_SKIP_MANUAL,
     DOMAIN,
@@ -60,6 +62,8 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         self._cloud_email: str = ""
         self._cloud_password: str = ""
         self._cloud_authenticated: bool = False
+        self._cloud_devices: dict[str, DiscoveredTwinklyDevice] = {}
+        self._lan_only_devices: dict[str, DiscoveredTwinklyDevice] = {}
         self._discovered_devices: dict[str, DiscoveredTwinklyDevice] = {}
         self._queued_devices: list[DiscoveredTwinklyDevice] = []
         self._scenes_summary: str = ""
@@ -149,28 +153,24 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
     def _collect_ha_discovered_hosts(self) -> list[str]:
         """Collect any hosts already seen by HA Zeroconf/DHCP or existing Twinkly entries."""
         extra_hosts: list[str] = []
-        # 1. Check public flow progress context dictionaries
-        for progress in self.hass.config_entries.flow.async_progress():
+        # 1. Check public flow progress context dictionaries for twinkly_pro only
+        for progress in self.hass.config_entries.flow.async_progress_by_handler(DOMAIN):
             ctx = progress.get("context", {})
             for key in ("host", "ip"):
                 val = ctx.get(key)
                 if isinstance(val, str) and val and val not in extra_hosts:
                     extra_hosts.append(val)
 
-        # 2. Check internal flow objects (e.g. official 'twinkly' zeroconf flow holding _host)
+        # 2. Check internal flow objects for active twinkly_pro zeroconf discoveries only
         raw_progress = getattr(self.hass.config_entries.flow, "_progress", {})
         if isinstance(raw_progress, dict):
             for flow_obj in raw_progress.values():
+                if getattr(flow_obj, "handler", None) != DOMAIN:
+                    continue
                 for attr in ("_host", "_discovered_host", "host"):
                     val = getattr(flow_obj, attr, None)
                     if isinstance(val, str) and val and val not in extra_hosts:
                         extra_hosts.append(val)
-
-        # 3. Check any existing core 'twinkly' config entries
-        for entry in self.hass.config_entries.async_entries("twinkly"):
-            h = entry.data.get("host") or entry.data.get("ip")
-            if isinstance(h, str) and h and h not in extra_hosts:
-                extra_hosts.append(h)
 
         return extra_hosts
 
@@ -216,10 +216,20 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
             configured_ids, configured_hosts = self._get_configured_ids_and_hosts()
+            self._cloud_devices = {}
+            self._lan_only_devices = {}
             self._discovered_devices = {}
-            for dev in account_res.devices:
-                host_Conflict = bool(dev.host) and dev.host.lower() in configured_hosts
-                if dev.unique_id not in configured_ids and not host_Conflict:
+
+            for dev in account_res.cloud_devices:
+                host_conflict = bool(dev.host) and dev.host.lower() in configured_hosts
+                if dev.unique_id not in configured_ids and not host_conflict:
+                    self._cloud_devices[dev.unique_id] = dev
+                    self._discovered_devices[dev.unique_id] = dev
+
+            for dev in account_res.lan_only_devices:
+                host_conflict = bool(dev.host) and dev.host.lower() in configured_hosts
+                if dev.unique_id not in configured_ids and not host_conflict:
+                    self._lan_only_devices[dev.unique_id] = dev
                     self._discovered_devices[dev.unique_id] = dev
 
             return await self.async_step_discovery_select()
@@ -243,13 +253,18 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_discovery_select(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 2: Display devices, scenes, and compositions found via Cloud & LAN UDP 5555."""
+        """Step 2: Display Cloud account devices separately from active LAN-only devices."""
         if not self._discovered_devices:
             # No unconfigured devices responded automatically -> move to optional Manual IP step
             return await self.async_step_manual()
 
         if user_input is not None:
-            selected_keys: list[str] = user_input.get(CONF_SELECTED_DEVICES, [])
+            selected_cloud: list[str] = user_input.get(CONF_SELECTED_CLOUD_DEVICES, [])
+            selected_lan: list[str] = user_input.get(CONF_SELECTED_LAN_DEVICES, [])
+            selected_legacy: list[str] = user_input.get(CONF_SELECTED_DEVICES, [])
+            selected_keys = list(
+                dict.fromkeys([*selected_cloud, *selected_lan, *selected_legacy])
+            )
             add_manual: bool = bool(user_input.get(CONF_ADD_MANUAL_IP, False))
 
             self._queued_devices = [
@@ -263,32 +278,46 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
 
             return await self._async_finalize_selected_devices(self._queued_devices)
 
-        device_options = {
-            uid: dev.display_label for uid, dev in self._discovered_devices.items()
-        }
-        default_selected = list(device_options.keys())
+        schema_dict: dict[Any, Any] = {}
 
-        schema = vol.Schema(
-            {
-                vol.Optional(
-                    CONF_SELECTED_DEVICES,
-                    default=default_selected,
-                ): cv.multi_select(device_options),
-                vol.Optional(CONF_ADD_MANUAL_IP, default=False): bool,
+        if self._cloud_devices:
+            cloud_options = {
+                uid: dev.display_label for uid, dev in self._cloud_devices.items()
             }
-        )
+            schema_dict[
+                vol.Optional(
+                    CONF_SELECTED_CLOUD_DEVICES,
+                    default=list(cloud_options.keys()),
+                )
+            ] = cv.multi_select(cloud_options)
+
+        if self._lan_only_devices:
+            lan_options = {
+                uid: dev.display_label for uid, dev in self._lan_only_devices.items()
+            }
+            schema_dict[
+                vol.Optional(
+                    CONF_SELECTED_LAN_DEVICES,
+                    default=list(lan_options.keys()),
+                )
+            ] = cv.multi_select(lan_options)
+
+        schema_dict[vol.Optional(CONF_ADD_MANUAL_IP, default=False)] = bool
+        schema = vol.Schema(schema_dict)
 
         cloud_status = (
-            f"Подключен ({self._cloud_email})"
+            f"Подключен ({self._cloud_email}) — в аккаунте: {len(self._cloud_devices)}"
             if self._cloud_email
-            else "Пропущен (локальное сканирование)"
+            else "Пропущен (только поиск в локальной сети)"
         )
 
         return self.async_show_form(
             step_id="discovery_select",
             data_schema=schema,
             description_placeholders={
-                "count": str(len(device_options)),
+                "count": str(len(self._discovered_devices)),
+                "cloud_count": str(len(self._cloud_devices)),
+                "lan_count": str(len(self._lan_only_devices)),
                 "cloud_status": cloud_status,
                 "scenes": self._scenes_summary or "По умолчанию",
                 "compositions": self._compositions_summary or "Отдельные устройства",

@@ -12,8 +12,10 @@
       },
       "discovery_select": {
         "title": "Step 2: Discovered Devices, Scenes & Compositions",
-        "description": "Found **{count}** Twinkly device(s).\n• **Cloud:** {cloud_status}\n• **Scenes:** {scenes}\n• **Compositions / Groups:** {compositions}\n\nSelect the devices to add to Home Assistant:",
+        "description": "Found **{count}** Twinkly device(s) (Cloud account: **{cloud_count}**, LAN-only: **{lan_count}**).\n• **Cloud:** {cloud_status}\n• **Scenes:** {scenes}\n• **Compositions / Groups:** {compositions}\n\nSelect the devices to add to Home Assistant:",
         "data": {
+          "selected_cloud_devices": "Devices from Twinkly Cloud Account",
+          "selected_lan_devices": "Active Local Network Devices (not in Cloud account)",
           "selected_devices": "Discovered Twinkly Devices",
           "add_manual_ip": "Also add another device manually by IP address on the next step"
         }

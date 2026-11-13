@@ -12,8 +12,10 @@
       },
       "discovery_select": {
         "title": "Шаг 2: Найденные устройства, сцены и композиции",
-        "description": "Найдено устройств Twinkly: **{count}**.\n• **Облако:** {cloud_status}\n• **Сцены / Комнаты:** {scenes}\n• **Композиции (группы):** {compositions}\n\nОтметьте устройства, которые нужно добавить в Home Assistant:",
+        "description": "Найдено устройств Twinkly: **{count}** (из облака: **{cloud_count}**, в локальной сети: **{lan_count}**).\n• **Облако:** {cloud_status}\n• **Сцены / Комнаты:** {scenes}\n• **Композиции (группы):** {compositions}\n\nОтметьте устройства, которые нужно добавить в Home Assistant:",
         "data": {
+          "selected_cloud_devices": "Устройства из облачного аккаунта Twinkly",
+          "selected_lan_devices": "Устройства в локальной сети (не из этого облака)",
           "selected_devices": "Обнаруженные гирлянды и композиции",
           "add_manual_ip": "Дополнительно добавить устройство вручную по IP на следующем шаге"
         }

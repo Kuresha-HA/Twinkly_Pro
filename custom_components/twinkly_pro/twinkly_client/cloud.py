@@ -175,6 +175,8 @@ class CloudAccountResult:
     authenticated: bool = False
     email: str = ""
     devices: list[DiscoveredTwinklyDevice] = field(default_factory=list)
+    cloud_devices: list[DiscoveredTwinklyDevice] = field(default_factory=list)
+    lan_only_devices: list[DiscoveredTwinklyDevice] = field(default_factory=list)
     scenes: list[str] = field(default_factory=list)
     compositions: dict[str, str] = field(default_factory=dict)  # group_uid -> name
 
@@ -395,6 +397,8 @@ class TwinklyCloudClient:
         for cdev in cloud_inv.get("devices", []):
             if not isinstance(cdev, dict):
                 continue
+            if cdev.get("deleted") or cdev.get("is_deleted") or cdev.get("archived"):
+                continue
             mac = _normalize_mac(
                 str(
                     cdev.get("mac")
@@ -515,7 +519,7 @@ class TwinklyCloudClient:
             if ldev.uuid:
                 lan_by_uuid[ldev.uuid] = ldev
 
-        merged_devices: list[DiscoveredTwinklyDevice] = list(lan_devices)
+        final_cloud_devices: list[DiscoveredTwinklyDevice] = []
         matched_lan_ids: set[str] = set()
 
         for cdev in cloud_devices:
@@ -536,9 +540,9 @@ class TwinklyCloudClient:
                     matched_lan.composition_name = cdev.composition_name
                 if cdev.group_uid and not matched_lan.group_uid:
                     matched_lan.group_uid = cdev.group_uid
+                final_cloud_devices.append(matched_lan)
             else:
-                # Device exists in Twinkly Cloud (e.g. Twinkly Music or device that didn't reply to UDP broadcast)
-                # If cloud has a known IP or mDNS name, try a quick probe
+                # Cloud device is offline or didn't respond to UDP broadcast
                 if cdev.host:
                     probed = await async_probe_discovered_host(
                         cdev.host, session=session, fallback_name=cdev.name
@@ -547,9 +551,17 @@ class TwinklyCloudClient:
                         probed.source = "cloud+lan"
                         probed.scene_name = cdev.scene_name
                         probed.composition_name = cdev.composition_name
-                        merged_devices.append(probed)
+                        matched_lan_ids.add(probed.unique_id)
+                        final_cloud_devices.append(probed)
                         continue
-                merged_devices.append(cdev)
+                    # Stale IP in cloud and device didn't respond -> mark offline
+                    cdev.host = ""
+                final_cloud_devices.append(cdev)
+
+        lan_only_devices = [
+            ldev for ldev in lan_devices if ldev.unique_id not in matched_lan_ids
+        ]
+        merged_devices = final_cloud_devices + lan_only_devices
 
         # Also infer compositions from controller Master/Slave sync state on LAN
         master_names_by_group: dict[str, str] = {}
@@ -572,6 +584,8 @@ class TwinklyCloudClient:
             authenticated=cloud_ok,
             email=email,
             devices=merged_devices,
+            cloud_devices=final_cloud_devices,
+            lan_only_devices=lan_only_devices,
             scenes=sorted(scenes_set),
             compositions=compositions,
         )

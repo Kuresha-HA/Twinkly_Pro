@@ -503,3 +503,30 @@ async def test_live_endpoint_probing_in_snapshot() -> None:
         await runner.cleanup()
 
 
+def test_cloud_deleted_devices_filtered_and_split() -> None:
+    """Verify deleted cloud devices are skipped and active ones are kept."""
+    cloud_inv = {
+        "devices": [
+            {
+                "name": "Active Garland",
+                "mac": "404cca111111",
+                "uuid": "uuid-active",
+                "product_code": "TWS250SPP",
+                "number_of_led": 250,
+            },
+            {
+                "name": "Deleted Old Curtain",
+                "mac": "404cca222222",
+                "uuid": "uuid-deleted",
+                "product_code": "TWW210SPP",
+                "deleted": True,
+            },
+        ],
+        "objects": [],
+        "profile": [],
+    }
+    devs, _, _ = TwinklyCloudClient._parse_cloud_records(cloud_inv)
+    assert len(devs) == 1
+    assert devs[0].name == "Active Garland"
+
+
