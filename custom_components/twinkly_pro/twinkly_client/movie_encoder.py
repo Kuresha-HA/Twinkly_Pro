@@ -79,12 +79,27 @@ def _normalize_coordinates(
     ]
 
 
+def _rgb_buffer_to_aww(buf: bytearray) -> bytes:
+    """Convert an RGB byte buffer into Amber / Warm White / Cold White (AWW) channels."""
+    out = bytearray(len(buf))
+    for i in range(0, len(buf) - 2, 3):
+        r, g, b = buf[i], buf[i + 1], buf[i + 2]
+        amber = min(255, int(r * 0.85 + g * 0.20))
+        warm_white = min(255, int((r + g + b) / 3.0))
+        cold_white = min(255, int(b * 0.85 + g * 0.20))
+        out[i] = amber
+        out[i + 1] = warm_white
+        out[i + 2] = cold_white
+    return bytes(out)
+
+
 def generate_effect_frame(
     preset: str,
     normalized_coords: list[tuple[float, float, float]],
     phase: float,
     bytes_per_led: int = 3,
     params: dict[str, Any] | None = None,
+    color_profile: str = "RGB",
 ) -> bytes:
     """Generate a single binary frame for the given effect preset and normalized coordinates.
 
@@ -208,6 +223,8 @@ def generate_effect_frame(
             hue = (ny + t) % 1.0
             buf.extend(_hsv_to_rgb_bytes(hue, 1.0, 1.0, bytes_per_led))
 
+    if color_profile.upper() == "AWW" and bytes_per_led == 3:
+        return _rgb_buffer_to_aww(buf)
     return bytes(buf)
 
 
@@ -218,6 +235,7 @@ def compile_procedural_movie(
     fps: int = 20,
     bytes_per_led: int = 3,
     params: dict[str, Any] | None = None,
+    color_profile: str = "RGB",
 ) -> tuple[bytes, int, str]:
     """Compile a full multi-frame binary .movie buffer for Twinkly flash memory.
 
@@ -237,6 +255,7 @@ def compile_procedural_movie(
             phase=phase,
             bytes_per_led=bytes_per_led,
             params=params,
+            color_profile=color_profile,
         )
         full_buffer.extend(frame_bytes)
 

@@ -480,6 +480,132 @@ class MusicState:
 
 
 @dataclass(slots=True)
+class DeviceCapabilities:
+    """Hardware and firmware capability matrix derived from gestalt and live endpoint probing."""
+
+    generation: int = 2  # 1 (ESP8266: A/B/C/D) or 2 (ESP32: F/G/N/P)
+    device_category: str = "light_string"  # light_string, wall_matrix, pro_controller, music_dongle
+    color_profile: str = "RGB"  # RGB, RGBW, AWW, MUSIC
+    rt_protocol_version: int = 3  # 1 (Gen I), 3 (Gen II+), 0 (unsupported)
+    supports_light: bool = True
+    supports_brightness: bool = True
+    supports_color_mode: bool = True
+    supports_multi_movies: bool = True
+    supports_playlists: bool = True
+    supports_music_reactive: bool = True
+    supports_sync_group: bool = True
+    supports_rt_streaming: bool = True
+    is_matrix_tiles: bool = False
+    tile_count: int = 0
+
+    @classmethod
+    def from_gestalt(
+        cls,
+        gestalt: GestaltInfo,
+        probed: dict[str, bool] | None = None,
+    ) -> DeviceCapabilities:
+        """Build DeviceCapabilities from GestaltInfo and optional live-probed endpoint flags."""
+        fw_family = gestalt.fw_family.upper().strip()
+        pcode = gestalt.product_code.upper().strip()
+        pname = gestalt.product_name.upper().strip()
+
+        generation = 1 if fw_family in ("A", "B", "C", "D") else 2
+
+        if gestalt.is_music_dongle:
+            device_category = "music_dongle"
+        elif (
+            pcode.startswith(("TWQ", "TWM"))
+            or "SQUARES" in pname
+            or "MATRIX" in pname
+        ):
+            device_category = "wall_matrix"
+        elif fw_family == "P" or pcode.startswith("TWPRO"):
+            device_category = "pro_controller"
+        else:
+            device_category = "light_string"
+
+        if device_category == "music_dongle":
+            color_profile = "MUSIC"
+        elif gestalt.led_profile.upper() in ("RGB", "RGBW", "AWW"):
+            color_profile = gestalt.led_profile.upper()
+        else:
+            color_profile = "RGB"
+
+        is_matrix = device_category == "wall_matrix"
+        tile_count = (
+            max(1, gestalt.number_of_led // 64)
+            if is_matrix and gestalt.number_of_led > 0
+            else 0
+        )
+
+        if device_category == "music_dongle":
+            caps = cls(
+                generation=generation,
+                device_category=device_category,
+                color_profile=color_profile,
+                rt_protocol_version=0,
+                supports_light=False,
+                supports_brightness=False,
+                supports_color_mode=False,
+                supports_multi_movies=False,
+                supports_playlists=False,
+                supports_music_reactive=True,
+                supports_sync_group=False,
+                supports_rt_streaming=False,
+                is_matrix_tiles=False,
+                tile_count=0,
+            )
+        elif generation == 1:
+            caps = cls(
+                generation=1,
+                device_category=device_category,
+                color_profile=color_profile,
+                rt_protocol_version=1,
+                supports_light=True,
+                supports_brightness=True,
+                supports_color_mode=False,
+                supports_multi_movies=False,
+                supports_playlists=False,
+                supports_music_reactive=False,
+                supports_sync_group=True,
+                supports_rt_streaming=True,
+                is_matrix_tiles=is_matrix,
+                tile_count=tile_count,
+            )
+        else:
+            caps = cls(
+                generation=2,
+                device_category=device_category,
+                color_profile=color_profile,
+                rt_protocol_version=3,
+                supports_light=True,
+                supports_brightness=True,
+                supports_color_mode=True,
+                supports_multi_movies=True,
+                supports_playlists=True,
+                supports_music_reactive=True,
+                supports_sync_group=True,
+                supports_rt_streaming=True,
+                is_matrix_tiles=is_matrix,
+                tile_count=tile_count,
+            )
+
+        if probed and device_category != "music_dongle":
+            for flag in (
+                "supports_brightness",
+                "supports_color_mode",
+                "supports_multi_movies",
+                "supports_playlists",
+                "supports_music_reactive",
+                "supports_sync_group",
+            ):
+                if flag in probed:
+                    setattr(caps, flag, bool(probed[flag]))
+
+        return caps
+
+
+@dataclass(slots=True)
 class TwinklyDeviceSnapshot:
     """Complete snapshot of a Twinkly device state."""
 
@@ -494,6 +620,7 @@ class TwinklyDeviceSnapshot:
     playlist: PlaylistState = field(default_factory=PlaylistState)
     music: MusicState = field(default_factory=MusicState)
     layout: DeviceLayout = field(default_factory=DeviceLayout)
+    capabilities: DeviceCapabilities = field(default_factory=DeviceCapabilities)
     online: bool = True
     is_rt_streaming: bool = False
     active_rt_preset: str = ""

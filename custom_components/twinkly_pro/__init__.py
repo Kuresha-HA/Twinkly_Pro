@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant, ServiceCall
     from .coordinator import TwinklyProCoordinator
+    from .twinkly_client import DeviceCapabilities
 
 try:
     import voluptuous as vol
@@ -52,29 +53,76 @@ except ImportError:
 _LOGGER = logging.getLogger(__name__)
 
 
-def _async_cleanup_music_dongle_entities(
-    hass: HomeAssistant, entry: ConfigEntry
+def _async_cleanup_unsupported_entities(
+    hass: HomeAssistant, entry: ConfigEntry, caps: DeviceCapabilities
 ) -> None:
-    """Remove garland-only entities from entity registry if attached to a Twinkly Music dongle."""
+    """Remove entities from HA entity registry that are unsupported by DeviceCapabilities."""
     from homeassistant.helpers import entity_registry as er
 
     ent_reg = er.async_get(hass)
-    garland_suffixes = (
+    is_music = caps.device_category == "music_dongle"
+
+    supported_suffixes: set[str] = set()
+    if caps.supports_light:
+        supported_suffixes.update({"_light", "_operating_mode"})
+    if caps.supports_multi_movies:
+        supported_suffixes.add("_active_movie")
+    if caps.supports_playlists:
+        supported_suffixes.add("_playlist_track")
+    if caps.supports_music_reactive:
+        supported_suffixes.add("_music_driver")
+    if caps.supports_rt_streaming:
+        supported_suffixes.add("_live_rt_preset")
+
+    if is_music:
+        supported_suffixes.update(
+            {
+                "_mic_sensitivity",
+                "_next_music_preset",
+                "_prev_music_preset",
+                "_music_dongle_status",
+            }
+        )
+    else:
+        if caps.supports_light and caps.supports_brightness:
+            supported_suffixes.add("_brightness_pct")
+        if caps.supports_playlists or caps.supports_multi_movies:
+            supported_suffixes.update({"_next_effect", "_prev_effect"})
+        if caps.supports_sync_group:
+            supported_suffixes.update({"_leave_sync_group", "_sync_group_role"})
+        if caps.supports_multi_movies:
+            supported_suffixes.add("_flash_memory_used")
+        if caps.supports_light:
+            supported_suffixes.add("_led_count")
+        if caps.is_matrix_tiles:
+            supported_suffixes.add("_matrix_tiles")
+
+    all_known_suffixes = (
         "_light",
         "_operating_mode",
         "_active_movie",
         "_playlist_track",
+        "_music_driver",
         "_live_rt_preset",
+        "_mic_sensitivity",
         "_brightness_pct",
+        "_next_music_preset",
+        "_prev_music_preset",
         "_next_effect",
         "_prev_effect",
         "_leave_sync_group",
+        "_music_dongle_status",
         "_sync_group_role",
         "_flash_memory_used",
         "_led_count",
+        "_matrix_tiles",
     )
+
     for reg_entry in list(er.async_entries_for_config_entry(ent_reg, entry.entry_id)):
-        if reg_entry.unique_id.endswith(garland_suffixes):
+        uid = reg_entry.unique_id
+        if any(uid.endswith(s) for s in all_known_suffixes) and not any(
+            uid.endswith(s) for s in supported_suffixes
+        ):
             ent_reg.async_remove(reg_entry.entity_id)
 
 
@@ -124,8 +172,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     hass.data[DOMAIN]["coordinators"][entry.entry_id] = coordinator
 
-    if coordinator.is_music_dongle:
-        _async_cleanup_music_dongle_entities(hass, entry)
+    _async_cleanup_unsupported_entities(hass, entry, coordinator.capabilities)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 

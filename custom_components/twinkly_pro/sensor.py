@@ -20,21 +20,27 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro sensor entities depending on device type."""
+    """Set up Twinkly Pro sensor entities dynamically from DeviceCapabilities."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
-    if coordinator.is_music_dongle:
-        async_add_entities([TwinklyMusicDongleStatusSensor(coordinator)])
-        return
+    caps = coordinator.capabilities
+    entities: list[SensorEntity] = []
 
-    async_add_entities(
-        [
-            TwinklyGroupRoleSensor(coordinator),
-            TwinklyFlashMemorySensor(coordinator),
-            TwinklyLedCountSensor(coordinator),
-        ]
-    )
+    if caps.device_category == "music_dongle":
+        entities.append(TwinklyMusicDongleStatusSensor(coordinator))
+    else:
+        if caps.supports_sync_group:
+            entities.append(TwinklyGroupRoleSensor(coordinator))
+        if caps.supports_multi_movies:
+            entities.append(TwinklyFlashMemorySensor(coordinator))
+        if caps.supports_light:
+            entities.append(TwinklyLedCountSensor(coordinator))
+        if caps.is_matrix_tiles:
+            entities.append(TwinklyMatrixTilesSensor(coordinator))
+
+    if entities:
+        async_add_entities(entities)
 
 
 class _TwinklyBaseSensor(CoordinatorEntity[TwinklyProCoordinator], SensorEntity):
@@ -209,4 +215,33 @@ class TwinklyMusicDongleStatusSensor(_TwinklyBaseSensor):
             "music_mode": snap.music.mode,
             "available_drivers": len(snap.music.drivers),
             "sensitivity": snap.music.sensitivity,
+        }
+
+
+class TwinklyMatrixTilesSensor(_TwinklyBaseSensor):
+    """Sensor reporting connected 8x8 tiles on Twinkly Squares / Matrix panels."""
+
+    _attr_native_unit_of_measurement = "tiles"
+
+    def __init__(self, coordinator: TwinklyProCoordinator) -> None:
+        """Initialize matrix tiles sensor."""
+        super().__init__(
+            coordinator, "matrix_tiles", "Matrix Tiles", "mdi:grid"
+        )
+
+    @property
+    def native_value(self) -> int:
+        """Return number of connected 8x8 tiles."""
+        return self.coordinator.capabilities.tile_count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return matrix geometry details."""
+        snap = self.coordinator.data
+        caps = self.coordinator.capabilities
+        return {
+            "tile_count": caps.tile_count,
+            "pixels_per_tile": 64,
+            "total_pixels": snap.gestalt.number_of_led if snap else caps.tile_count * 64,
+            "device_category": caps.device_category,
         }

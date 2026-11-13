@@ -10,6 +10,7 @@ import pytest
 
 from custom_components.twinkly_pro.twinkly_client import (
     CURATED_GALLERY_TEMPLATES,
+    DeviceCapabilities,
     DeviceLayout,
     DiscoveredTwinklyDevice,
     GestaltInfo,
@@ -360,5 +361,145 @@ def test_twinkly_music_dongle_gestalt_and_cloud_parsing() -> None:
     assert music_dev.name == "My Twinkly Music"
     assert "🎵 My Twinkly Music" in music_dev.display_label
     assert "Twinkly Music" in music_dev.display_label
+
+
+def test_device_capabilities_matrix() -> None:
+    """Verify DeviceCapabilities across Gen I, Gold AWW, Squares Matrix, and Music Dongle."""
+    gen1 = GestaltInfo.from_dict(
+        {
+            "product_code": "TWS175STP",
+            "fw_family": "D",
+            "number_of_led": 175,
+            "led_profile": "RGB",
+        }
+    )
+    caps_gen1 = DeviceCapabilities.from_gestalt(gen1)
+    assert caps_gen1.generation == 1
+    assert caps_gen1.rt_protocol_version == 1
+    assert caps_gen1.supports_light is True
+    assert caps_gen1.supports_multi_movies is False
+    assert caps_gen1.supports_playlists is False
+    assert caps_gen1.supports_music_reactive is False
+    assert caps_gen1.supports_color_mode is False
+
+    gold = GestaltInfo.from_dict(
+        {
+            "product_code": "TWS250GOP",
+            "fw_family": "G",
+            "number_of_led": 250,
+            "led_profile": "AWW",
+        }
+    )
+    caps_gold = DeviceCapabilities.from_gestalt(gold)
+    assert caps_gold.generation == 2
+    assert caps_gold.color_profile == "AWW"
+    assert caps_gold.rt_protocol_version == 3
+
+    squares = GestaltInfo.from_dict(
+        {
+            "product_code": "TWQ064STW",
+            "fw_family": "G",
+            "number_of_led": 256,
+            "led_profile": "RGB",
+        }
+    )
+    caps_sq = DeviceCapabilities.from_gestalt(squares)
+    assert caps_sq.device_category == "wall_matrix"
+    assert caps_sq.is_matrix_tiles is True
+    assert caps_sq.tile_count == 4
+
+    music = GestaltInfo.from_dict(
+        {
+            "product_code": "TMD01USB",
+            "fw_family": "M",
+            "number_of_led": 0,
+        }
+    )
+    caps_music = DeviceCapabilities.from_gestalt(music)
+    assert caps_music.device_category == "music_dongle"
+    assert caps_music.supports_light is False
+    assert caps_music.supports_brightness is False
+    assert caps_music.supports_music_reactive is True
+
+
+def test_udp_v1_packet_and_aww_movie_encoding() -> None:
+    """Verify Gen I v1 UDP packet header and AWW Gold Edition movie encoding."""
+    token = base64.b64decode("AAECAwQFBgc=")
+    frame = bytes([255, 128, 64] * 10)  # 10 RGB LEDs
+    pkts = TwinklyRealtimeStreamer.build_v1_packets(token, frame, bytes_per_led=3)
+    assert len(pkts) == 1
+    assert pkts[0][0] == 1
+    assert pkts[0][1:9] == token
+    assert pkts[0][9] == 10
+    assert pkts[0][10:] == frame
+
+    coords = DeviceLayout.create_default_tree_coordinates(15)
+    raw_aww, frames_count, _ = compile_procedural_movie(
+        preset="fire_flame",
+        coordinates=coords,
+        duration_seconds=1.0,
+        fps=10,
+        bytes_per_led=3,
+        color_profile="AWW",
+    )
+    assert frames_count == 10
+    assert len(raw_aww) == 10 * 15 * 3
+
+
+@pytest.mark.asyncio
+async def test_live_endpoint_probing_in_snapshot() -> None:
+    """Verify fetch_full_snapshot probes endpoints and disables unsupported features."""
+
+    async def handle_gestalt(request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "device_name": "Gen1 String",
+                "mac": "AA:11:22:33:44:55",
+                "uuid": "uuid-gen1",
+                "fw_family": "G",
+                "number_of_led": 50,
+                "led_profile": "RGB",
+                "code": 1000,
+            }
+        )
+
+    async def handle_login(request: web.Request) -> web.Response:
+        return web.json_response({"authentication_token": "AAECAwQFBgc=", "code": 1000})
+
+    async def handle_verify(request: web.Request) -> web.Response:
+        return web.json_response({"code": 1000})
+
+    async def handle_ok_mode(request: web.Request) -> web.Response:
+        return web.json_response({"mode": "movie", "code": 1000})
+
+    async def handle_not_found(request: web.Request) -> web.Response:
+        return web.Response(status=404, text="Not supported")
+
+    app = web.Application()
+    app.router.add_get("/xled/v1/gestalt", handle_gestalt)
+    app.router.add_post("/xled/v1/login", handle_login)
+    app.router.add_post("/xled/v1/verify", handle_verify)
+    app.router.add_get("/xled/v1/led/mode", handle_ok_mode)
+    app.router.add_get("/xled/v1/movies", handle_not_found)
+    app.router.add_get("/xled/v1/playlist", handle_not_found)
+    app.router.add_get("/xled/v1/music/drivers", handle_not_found)
+    app.router.add_get("/xled/v1/led/color", handle_not_found)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    client = TwinklyClient(host="127.0.0.1", port=port)
+    try:
+        snap = await client.fetch_full_snapshot()
+        assert snap.capabilities.supports_multi_movies is False
+        assert snap.capabilities.supports_playlists is False
+        assert snap.capabilities.supports_music_reactive is False
+        assert snap.capabilities.supports_color_mode is False
+    finally:
+        await client.close()
+        await runner.cleanup()
 
 

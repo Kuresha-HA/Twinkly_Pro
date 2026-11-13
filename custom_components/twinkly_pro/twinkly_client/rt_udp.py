@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from .client import TwinklyClient, TwinklyError
+from .models import DeviceCapabilities
 from .movie_encoder import _normalize_coordinates, generate_effect_frame
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,6 +45,22 @@ class TwinklyRealtimeStreamer:
         return self._sock
 
     @staticmethod
+    def build_v1_packets(
+        raw_token: bytes, frame_bytes: bytes, bytes_per_led: int = 3
+    ) -> list[bytes]:
+        """Build Twinkly Gen I (v1) UDP packet from a raw frame buffer.
+
+        Packet header structure (10 bytes):
+        - Byte 0: 0x01 (protocol version 1)
+        - Bytes 1..8: 8-byte decoded authentication token
+        - Byte 9: LED count (capped at 255)
+        """
+        token_8 = (raw_token or b"\x00" * 8)[:8].ljust(8, b"\x00")
+        led_count = min(255, max(0, len(frame_bytes) // max(1, bytes_per_led)))
+        header = b"\x01" + token_8 + bytes((led_count,))
+        return [header + frame_bytes]
+
+    @staticmethod
     def build_v3_packets(raw_token: bytes, frame_bytes: bytes) -> list[bytes]:
         """Build Twinkly v3 UDP packets from a raw frame buffer.
 
@@ -67,13 +84,23 @@ class TwinklyRealtimeStreamer:
 
         return packets
 
-    async def send_frame(self, frame_bytes: bytes) -> None:
-        """Send a single raw RGB/RGBW frame over UDP to the Twinkly device."""
+    async def send_frame(
+        self,
+        frame_bytes: bytes,
+        rt_version: int = 3,
+        bytes_per_led: int = 3,
+    ) -> None:
+        """Send a single raw RGB/RGBW/AWW frame over UDP to the Twinkly device."""
         if not self.client.raw_token:
             await self.client.authenticate()
 
         raw_token = self.client.raw_token or b"\x00" * 8
-        packets = self.build_v3_packets(raw_token, frame_bytes)
+        if rt_version == 1:
+            packets = self.build_v1_packets(
+                raw_token, frame_bytes, bytes_per_led=bytes_per_led
+            )
+        else:
+            packets = self.build_v3_packets(raw_token, frame_bytes)
         sock = self._ensure_socket()
         target = (self.client.host, self.port)
 
@@ -97,6 +124,7 @@ class TwinklyRealtimeStreamer:
 
         await self.client.set_mode("rt")
         gestalt = await self.client.get_gestalt()
+        caps = DeviceCapabilities.from_gestalt(gestalt)
         layout = await self.client.get_layout()
         norm_coords = _normalize_coordinates(layout.coordinates)
 
@@ -110,6 +138,8 @@ class TwinklyRealtimeStreamer:
                 bytes_per_led=gestalt.bytes_per_led,
                 fps=max(5, min(60, fps)),
                 params=self.active_params,
+                rt_version=caps.rt_protocol_version,
+                color_profile=caps.color_profile,
             )
         )
 
@@ -120,6 +150,8 @@ class TwinklyRealtimeStreamer:
         bytes_per_led: int,
         fps: int,
         params: dict[str, Any],
+        rt_version: int = 3,
+        color_profile: str = "RGB",
     ) -> None:
         """Background loop sending UDP frames at the target frame rate."""
         frame_interval = 1.0 / float(fps)
@@ -147,8 +179,13 @@ class TwinklyRealtimeStreamer:
                     phase=phase,
                     bytes_per_led=bytes_per_led,
                     params=params,
+                    color_profile=color_profile,
                 )
-                await self.send_frame(frame)
+                await self.send_frame(
+                    frame,
+                    rt_version=rt_version,
+                    bytes_per_led=bytes_per_led,
+                )
 
                 work_duration = time.monotonic() - now
                 await asyncio.sleep(max(0.005, frame_interval - work_duration))

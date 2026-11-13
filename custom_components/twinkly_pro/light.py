@@ -6,6 +6,7 @@ from typing import Any
 
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_COLOR_TEMP_KELVIN,
     ATTR_EFFECT,
     ATTR_RGB_COLOR,
     ATTR_RGBW_COLOR,
@@ -18,7 +19,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import BUILTIN_EFFECT_PRESETS, DOMAIN, LED_PROFILE_RGBW, MODE_OFF
+from .const import (
+    BUILTIN_EFFECT_PRESETS,
+    DOMAIN,
+    LED_PROFILE_AWW,
+    LED_PROFILE_RGBW,
+    MODE_OFF,
+)
 from .coordinator import TwinklyProCoordinator
 
 EFFECT_PREFIX_MOVIE = "Movie: "
@@ -32,11 +39,11 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Twinkly Pro Light entity from a config entry (only for LED garlands, not Music dongles)."""
+    """Set up the Twinkly Pro Light entity if supported by device capabilities."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
-    if coordinator.is_music_dongle:
+    if not coordinator.capabilities.supports_light:
         return
     async_add_entities([TwinklyProLight(coordinator)])
 
@@ -47,6 +54,8 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
     _attr_has_entity_name = True
     _attr_name = None
     _attr_supported_features = LightEntityFeature.EFFECT
+    _attr_min_color_temp_kelvin = 1800
+    _attr_max_color_temp_kelvin = 6500
 
     def __init__(self, coordinator: TwinklyProCoordinator) -> None:
         """Initialize the Twinkly Pro light entity."""
@@ -68,17 +77,47 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:
-        """Return supported color modes."""
-        if self._led_profile == LED_PROFILE_RGBW:
+        """Return supported color modes based on DeviceCapabilities."""
+        caps = self.coordinator.capabilities
+        if not caps.supports_color_mode:
+            if caps.supports_brightness:
+                return {ColorMode.BRIGHTNESS}
+            return {ColorMode.ONOFF}
+        if caps.color_profile == LED_PROFILE_RGBW:
             return {ColorMode.RGBW}
+        if caps.color_profile == LED_PROFILE_AWW:
+            return {ColorMode.COLOR_TEMP}
         return {ColorMode.RGB}
 
     @property
     def color_mode(self) -> ColorMode:
         """Return active color mode."""
-        if self._led_profile == LED_PROFILE_RGBW:
+        caps = self.coordinator.capabilities
+        if not caps.supports_color_mode:
+            return (
+                ColorMode.BRIGHTNESS if caps.supports_brightness else ColorMode.ONOFF
+            )
+        if caps.color_profile == LED_PROFILE_RGBW:
             return ColorMode.RGBW
+        if caps.color_profile == LED_PROFILE_AWW:
+            return ColorMode.COLOR_TEMP
         return ColorMode.RGB
+
+    @property
+    def color_temp_kelvin(self) -> int | None:
+        """Return color temperature in Kelvin for Gold Edition (AWW) devices."""
+        if self.coordinator.capabilities.color_profile != LED_PROFILE_AWW:
+            return None
+        snap = self.coordinator.data
+        if not snap:
+            return 2700
+        # AWW maps red->Amber (1800K), green->Warm White (3200K), blue->Cold White (6500K)
+        amber = snap.color.red
+        cold = snap.color.blue
+        total = max(1, amber + snap.color.green + cold)
+        ratio = (cold - amber) / float(total)  # -1.0 (amber) .. +1.0 (cold)
+        kelvin = int(3500 + ratio * 2300)
+        return max(1800, min(6500, kelvin))
 
     @property
     def is_on(self) -> bool:
@@ -116,17 +155,21 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
 
     @property
     def effect_list(self) -> list[str]:
-        """Return the list of supported effects (stored movies, playlist, music, and Live RT)."""
+        """Return the list of supported effects filtered by DeviceCapabilities."""
         effects: list[str] = []
+        caps = self.coordinator.capabilities
         snap = self.coordinator.data
         if snap:
-            for movie in snap.movies.movies:
-                effects.append(f"{EFFECT_PREFIX_MOVIE}{movie.id}: {movie.name}")
-            if snap.playlist.entries:
+            if caps.supports_multi_movies:
+                for movie in snap.movies.movies:
+                    effects.append(f"{EFFECT_PREFIX_MOVIE}{movie.id}: {movie.name}")
+            if caps.supports_playlists and snap.playlist.entries:
                 effects.append(EFFECT_PLAYLIST_QUEUE)
-        effects.append(EFFECT_MUSIC_REACTIVE)
-        for label in BUILTIN_EFFECT_PRESETS.values():
-            effects.append(f"{EFFECT_PREFIX_RT}{label}")
+        if caps.supports_music_reactive:
+            effects.append(EFFECT_MUSIC_REACTIVE)
+        if caps.supports_rt_streaming:
+            for label in BUILTIN_EFFECT_PRESETS.values():
+                effects.append(f"{EFFECT_PREFIX_RT}{label}")
         return effects
 
     @property
@@ -161,12 +204,16 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return rich state attributes including group role, playlist, and memory."""
+        """Return rich state attributes including capabilities, group role, and memory."""
         snap = self.coordinator.data
         if not snap:
             return {}
-        return {
+        caps = self.coordinator.capabilities
+        attrs: dict[str, Any] = {
             "operating_mode": snap.mode,
+            "generation": caps.generation,
+            "device_category": caps.device_category,
+            "rt_protocol_version": caps.rt_protocol_version,
             "sync_role": snap.sync.mode,
             "group_uid": snap.sync.group_uid,
             "is_rt_streaming": snap.is_rt_streaming,
@@ -177,20 +224,34 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
             "led_profile": snap.gestalt.led_profile,
             "layout_source": snap.layout.source,
         }
+        if caps.is_matrix_tiles:
+            attrs["tile_count"] = caps.tile_count
+        return attrs
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn the Twinkly light on with optional brightness, color, or effect."""
-        if ATTR_BRIGHTNESS in kwargs:
+        """Turn the Twinkly light on with optional brightness, color, color_temp, or effect."""
+        caps = self.coordinator.capabilities
+        if ATTR_BRIGHTNESS in kwargs and caps.supports_brightness:
             bri_255 = int(kwargs[ATTR_BRIGHTNESS])
             bri_100 = max(1, round((bri_255 / 255.0) * 100))
             await self.coordinator.async_set_brightness(bri_100)
 
-        if ATTR_RGBW_COLOR in kwargs:
+        if ATTR_COLOR_TEMP_KELVIN in kwargs and caps.supports_color_mode:
+            kelvin = max(1800, min(6500, int(kwargs[ATTR_COLOR_TEMP_KELVIN])))
+            # Convert 1800K..6500K to Amber (R), Warm White (G), Cold White (B)
+            t = (kelvin - 1800) / float(6500 - 1800)  # 0.0 (amber) .. 1.0 (cold)
+            amber = int(max(0, min(255, (1.0 - t) * 255)))
+            warm_white = int(max(0, min(255, (1.0 - abs(t - 0.45) * 1.5) * 255)))
+            cold_white = int(max(0, min(255, t * 255)))
+            await self.coordinator.async_set_color(amber, warm_white, cold_white)
+            return
+
+        if ATTR_RGBW_COLOR in kwargs and caps.supports_color_mode:
             r, g, b, w = kwargs[ATTR_RGBW_COLOR]
             await self.coordinator.async_set_color(r, g, b, w)
             return
 
-        if ATTR_RGB_COLOR in kwargs:
+        if ATTR_RGB_COLOR in kwargs and caps.supports_color_mode:
             r, g, b = kwargs[ATTR_RGB_COLOR]
             await self.coordinator.async_set_color(r, g, b)
             return
@@ -203,12 +264,14 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
         # Default turn on if currently off
         snap = self.coordinator.data
         if not snap or snap.mode == MODE_OFF:
-            if snap and snap.playlist.entries:
+            if caps.supports_playlists and snap and snap.playlist.entries:
                 await self.coordinator.async_set_mode("playlist")
             elif snap and snap.movies.movies:
                 await self.coordinator.async_set_mode("movie")
-            else:
+            elif caps.supports_color_mode:
                 await self.coordinator.async_set_mode("color")
+            else:
+                await self.coordinator.async_set_mode("movie")
 
     async def _async_apply_effect_string(self, effect_str: str) -> None:
         """Parse and activate an effect selected from the Light entity."""

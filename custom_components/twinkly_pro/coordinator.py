@@ -25,6 +25,7 @@ from .const import (
     DOMAIN,
 )
 from .twinkly_client import (
+    DeviceCapabilities,
     DeviceLayout,
     GestaltInfo,
     SyncInfo,
@@ -65,18 +66,26 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         )
 
     @property
+    def capabilities(self) -> DeviceCapabilities:
+        """Return the hardware & firmware capability matrix for this device."""
+        if self.data is not None:
+            return self.data.capabilities
+        d = self.entry.data
+        gestalt = GestaltInfo.from_dict(
+            {
+                "product_code": d.get(CONF_PRODUCT_CODE, ""),
+                "led_profile": d.get(CONF_LED_PROFILE, "RGB"),
+                "number_of_led": d.get(CONF_NUM_LEDS, 0),
+                "device_name": d.get(CONF_DEVICE_NAME, "Twinkly"),
+                "mac": d.get(CONF_MAC, ""),
+            }
+        )
+        return DeviceCapabilities.from_gestalt(gestalt)
+
+    @property
     def is_music_dongle(self) -> bool:
         """Return True if this coordinator manages a Twinkly Music USB dongle (TMD01USB)."""
-        if self.data and self.data.gestalt.is_music_dongle:
-            return True
-        pcode = str(self.entry.data.get(CONF_PRODUCT_CODE, "")).upper()
-        profile = str(self.entry.data.get(CONF_LED_PROFILE, "")).upper()
-        dname = str(self.entry.data.get(CONF_DEVICE_NAME, "")).lower()
-        return (
-            pcode.startswith("TMD")
-            or profile == "MUSIC"
-            or "twinkly music" in dname
-        )
+        return self.capabilities.device_category == "music_dongle"
 
     def _build_offline_snapshot(self) -> TwinklyDeviceSnapshot:
         """Build a fallback snapshot from ConfigEntry metadata when a Cloud device is unplugged/offline."""
@@ -114,6 +123,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             mode="off",
             sync=sync,
             layout=layout,
+            capabilities=DeviceCapabilities.from_gestalt(gestalt),
             online=False,
         )
 
@@ -409,6 +419,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             fps=fps,
             bytes_per_led=gestalt.bytes_per_led,
             params=params,
+            color_profile=gestalt.led_profile,
         )
         movie_id = await target.client.upload_movie(
             name=name,

@@ -17,26 +17,32 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro button entities depending on device type."""
+    """Set up Twinkly Pro button entities dynamically from DeviceCapabilities."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
-    if coordinator.is_music_dongle:
-        async_add_entities(
+    caps = coordinator.capabilities
+    entities: list[ButtonEntity] = []
+    if caps.device_category == "music_dongle":
+        entities.extend(
             [
                 TwinklyNextMusicPresetButton(coordinator),
                 TwinklyPrevMusicPresetButton(coordinator),
             ]
         )
-        return
+    else:
+        if caps.supports_playlists or caps.supports_multi_movies:
+            entities.extend(
+                [
+                    TwinklyNextTrackButton(coordinator),
+                    TwinklyPrevTrackButton(coordinator),
+                ]
+            )
+        if caps.supports_sync_group:
+            entities.append(TwinklyLeaveGroupButton(coordinator))
 
-    async_add_entities(
-        [
-            TwinklyNextTrackButton(coordinator),
-            TwinklyPrevTrackButton(coordinator),
-            TwinklyLeaveGroupButton(coordinator),
-        ]
-    )
+    if entities:
+        async_add_entities(entities)
 
 
 class _TwinklyBaseButton(CoordinatorEntity[TwinklyProCoordinator], ButtonEntity):

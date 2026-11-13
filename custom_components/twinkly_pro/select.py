@@ -17,23 +17,26 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro select entities based on device type (Garland vs Twinkly Music dongle)."""
+    """Set up Twinkly Pro select entities dynamically from DeviceCapabilities."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
-    if coordinator.is_music_dongle:
-        async_add_entities([TwinklyMusicDriverSelect(coordinator)])
-        return
+    caps = coordinator.capabilities
+    entities: list[SelectEntity] = []
 
-    async_add_entities(
-        [
-            TwinklyModeSelect(coordinator),
-            TwinklyMovieSelect(coordinator),
-            TwinklyPlaylistTrackSelect(coordinator),
-            TwinklyMusicDriverSelect(coordinator),
-            TwinklyLivePresetSelect(coordinator),
-        ]
-    )
+    if caps.supports_light:
+        entities.append(TwinklyModeSelect(coordinator))
+    if caps.supports_multi_movies:
+        entities.append(TwinklyMovieSelect(coordinator))
+    if caps.supports_playlists:
+        entities.append(TwinklyPlaylistTrackSelect(coordinator))
+    if caps.supports_music_reactive:
+        entities.append(TwinklyMusicDriverSelect(coordinator))
+    if caps.supports_rt_streaming:
+        entities.append(TwinklyLivePresetSelect(coordinator))
+
+    if entities:
+        async_add_entities(entities)
 
 
 class _TwinklyBaseSelect(CoordinatorEntity[TwinklyProCoordinator], SelectEntity):
@@ -63,7 +66,17 @@ class TwinklyModeSelect(_TwinklyBaseSelect):
     def __init__(self, coordinator: TwinklyProCoordinator) -> None:
         """Initialize the operating mode selector."""
         super().__init__(coordinator, "operating_mode", "Operating Mode", "mdi:tune-variant")
-        self._attr_options = list(ALL_MODES)
+        caps = coordinator.capabilities
+        modes = ["off", "movie", "demo"]
+        if caps.supports_color_mode:
+            modes.append("color")
+        if caps.supports_playlists:
+            modes.append("playlist")
+        if caps.supports_music_reactive:
+            modes.append("music")
+        if caps.supports_rt_streaming:
+            modes.append("rt")
+        self._attr_options = [m for m in ALL_MODES if m in modes]
 
     @property
     def current_option(self) -> str | None:
@@ -71,7 +84,7 @@ class TwinklyModeSelect(_TwinklyBaseSelect):
         snap = self.coordinator.data
         if not snap:
             return None
-        return snap.mode if snap.mode in ALL_MODES else "off"
+        return snap.mode if snap.mode in self._attr_options else "off"
 
     async def async_select_option(self, option: str) -> None:
         """Switch the Twinkly device to the selected operating mode."""

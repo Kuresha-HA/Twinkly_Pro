@@ -18,14 +18,18 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro number entities depending on device type."""
+    """Set up Twinkly Pro number entities dynamically from DeviceCapabilities."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
-    if coordinator.is_music_dongle:
-        async_add_entities([TwinklyMicSensitivityNumber(coordinator)])
-    else:
-        async_add_entities([TwinklyBrightnessNumber(coordinator)])
+    caps = coordinator.capabilities
+    entities: list[NumberEntity] = []
+    if caps.device_category == "music_dongle":
+        entities.append(TwinklyMicSensitivityNumber(coordinator))
+    elif caps.supports_light and caps.supports_brightness:
+        entities.append(TwinklyBrightnessNumber(coordinator))
+    if entities:
+        async_add_entities(entities)
 
 
 class TwinklyBrightnessNumber(

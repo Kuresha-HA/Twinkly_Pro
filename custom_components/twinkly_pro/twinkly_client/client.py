@@ -13,6 +13,7 @@ import aiohttp
 
 from .models import (
     DeviceBrightness,
+    DeviceCapabilities,
     DeviceColor,
     DeviceLayout,
     GestaltInfo,
@@ -66,6 +67,7 @@ class TwinklyClient:
         self._cached_gestalt: GestaltInfo | None = None
         self._cached_fw_version: str | None = None
         self._cached_layout: DeviceLayout | None = None
+        self._probed_features: dict[str, bool] = {}
 
     @property
     def raw_token(self) -> bytes | None:
@@ -289,8 +291,15 @@ class TwinklyClient:
         """Get current master brightness."""
         try:
             data = await self._request("GET", "led/out/brightness")
+            if data.get("code", 1000) != 1000:
+                self._probed_features["supports_brightness"] = False
+                return DeviceBrightness(enabled=True, value=100)
+            self._probed_features["supports_brightness"] = True
             return DeviceBrightness.from_dict(data)
+        except TwinklyConnectionError:
+            return DeviceBrightness(enabled=True, value=100)
         except TwinklyError:
+            self._probed_features["supports_brightness"] = False
             return DeviceBrightness(enabled=True, value=100)
 
     async def set_brightness(self, value: int, enabled: bool = True) -> None:
@@ -310,8 +319,15 @@ class TwinklyClient:
         """Get static color settings."""
         try:
             data = await self._request("GET", "led/color")
+            if data.get("code", 1000) != 1000:
+                self._probed_features["supports_color_mode"] = False
+                return DeviceColor()
+            self._probed_features["supports_color_mode"] = True
             return DeviceColor.from_dict(data)
+        except TwinklyConnectionError:
+            return DeviceColor()
         except TwinklyError:
+            self._probed_features["supports_color_mode"] = False
             return DeviceColor()
 
     async def set_color(
@@ -342,8 +358,15 @@ class TwinklyClient:
         """Fetch group sync configuration from /xled/v1/sync."""
         try:
             data = await self._request("GET", "sync")
+            if data.get("code", 1000) != 1000:
+                self._probed_features["supports_sync_group"] = False
+                return SyncInfo()
+            self._probed_features["supports_sync_group"] = True
             return SyncInfo.from_dict(data)
+        except TwinklyConnectionError:
+            return SyncInfo()
         except TwinklyError:
+            self._probed_features["supports_sync_group"] = False
             return SyncInfo()
 
     async def set_sync(
@@ -419,7 +442,14 @@ class TwinklyClient:
         """Fetch stored movies list and active movie."""
         try:
             movies_data = await self._request("GET", "movies")
+            if movies_data.get("code", 1000) != 1000:
+                self._probed_features["supports_multi_movies"] = False
+                return MoviesState()
+            self._probed_features["supports_multi_movies"] = True
+        except TwinklyConnectionError:
+            return MoviesState()
         except TwinklyError:
+            self._probed_features["supports_multi_movies"] = False
             return MoviesState()
 
         current_data: dict[str, Any] | None = None
@@ -520,7 +550,14 @@ class TwinklyClient:
         """Fetch playlist entries and currently playing item."""
         try:
             playlist_data = await self._request("GET", "playlist")
+            if playlist_data.get("code", 1000) != 1000:
+                self._probed_features["supports_playlists"] = False
+                return PlaylistState()
+            self._probed_features["supports_playlists"] = True
+        except TwinklyConnectionError:
+            return PlaylistState()
         except TwinklyError:
+            self._probed_features["supports_playlists"] = False
             return PlaylistState()
 
         current_data: dict[str, Any] | None = None
@@ -583,8 +620,14 @@ class TwinklyClient:
 
         try:
             drivers_data = await self._request("GET", "music/drivers")
-        except TwinklyError:
+            if drivers_data.get("code", 1000) == 1000:
+                self._probed_features["supports_music_reactive"] = True
+            else:
+                self._probed_features["supports_music_reactive"] = False
+        except TwinklyConnectionError:
             pass
+        except TwinklyError:
+            self._probed_features["supports_music_reactive"] = False
 
         try:
             current_driver_data = await self._request("GET", "music/drivers/current")
@@ -634,9 +677,22 @@ class TwinklyClient:
     async def fetch_full_snapshot(
         self, include_layout: bool = False
     ) -> TwinklyDeviceSnapshot:
-        """Gather a complete snapshot of the device state."""
+        """Gather a complete snapshot of the device state and compute DeviceCapabilities."""
         gestalt = await self.get_gestalt()
         fw_version = await self.get_firmware_version()
+
+        if gestalt.is_music_dongle:
+            music = await self.get_music_state()
+            caps = DeviceCapabilities.from_gestalt(gestalt)
+            return TwinklyDeviceSnapshot(
+                host=self.host,
+                gestalt=gestalt,
+                fw_version=fw_version,
+                mode="music" if (music.enabled or music.active) else "off",
+                music=music,
+                capabilities=caps,
+                online=True,
+            )
 
         mode_task = self.get_mode()
         brightness_task = self.get_brightness()
@@ -663,6 +719,7 @@ class TwinklyClient:
 
         playlist = await self.get_playlist_state(movies=movies.movies)
         layout = await self.get_layout(force_refresh=include_layout)
+        caps = DeviceCapabilities.from_gestalt(gestalt, probed=self._probed_features)
 
         return TwinklyDeviceSnapshot(
             host=self.host,
@@ -676,5 +733,6 @@ class TwinklyClient:
             playlist=playlist,
             music=music,
             layout=layout,
+            capabilities=caps,
             online=True,
         )

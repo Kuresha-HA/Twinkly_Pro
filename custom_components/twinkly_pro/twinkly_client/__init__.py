@@ -19,6 +19,7 @@ from .discovery import (
 )
 from .models import (
     DeviceBrightness,
+    DeviceCapabilities,
     DeviceColor,
     DeviceLayout,
     GestaltInfo,
@@ -43,6 +44,7 @@ __all__ = [
     "CURATED_GALLERY_TEMPLATES",
     "CloudAccountResult",
     "DeviceBrightness",
+    "DeviceCapabilities",
     "DeviceColor",
     "DeviceLayout",
     "DiscoveredTwinklyDevice",
