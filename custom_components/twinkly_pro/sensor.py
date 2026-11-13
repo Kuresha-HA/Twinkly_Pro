@@ -1,4 +1,4 @@
-"""Sensor entities for Twinkly Pro (Sync Group Role, Flash Memory, LED Layout)."""
+"""Sensor entities for Twinkly Pro (separate sensors for LED Garlands vs Twinkly Music Dongle)."""
 
 from __future__ import annotations
 
@@ -20,10 +20,14 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro sensor entities."""
+    """Set up Twinkly Pro sensor entities depending on device type."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
+    if coordinator.is_music_dongle:
+        async_add_entities([TwinklyMusicDongleStatusSensor(coordinator)])
+        return
+
     async_add_entities(
         [
             TwinklyGroupRoleSensor(coordinator),
@@ -45,7 +49,7 @@ class _TwinklyBaseSensor(CoordinatorEntity[TwinklyProCoordinator], SensorEntity)
         super().__init__(coordinator)
         mac = (
             coordinator.data.gestalt.mac
-            if coordinator.data
+            if coordinator.data and coordinator.data.gestalt.mac
             else coordinator.entry.data.get("mac", coordinator.host)
         )
         self._attr_unique_id = f"{mac}_{key}"
@@ -88,7 +92,9 @@ class TwinklyGroupRoleSensor(_TwinklyBaseSensor):
             "group_uid": snap.sync.group_uid,
             "master_uid": snap.sync.master_uid,
             "slave_id": snap.sync.slave_id,
-            "routed_to_master_host": target.host if target is not self.coordinator else None,
+            "routed_to_master_host": (
+                target.host if target is not self.coordinator else None
+            ),
         }
 
 
@@ -162,4 +168,45 @@ class TwinklyLedCountSensor(_TwinklyBaseSensor):
             "host": snap.host,
             "mac": snap.gestalt.mac,
             "uuid": snap.gestalt.uuid,
+        }
+
+
+class TwinklyMusicDongleStatusSensor(_TwinklyBaseSensor):
+    """Sensor reporting status of a Twinkly Music USB dongle (TMD01USB)."""
+
+    def __init__(self, coordinator: TwinklyProCoordinator) -> None:
+        """Initialize Twinkly Music dongle status sensor."""
+        super().__init__(
+            coordinator,
+            "music_dongle_status",
+            "Music Dongle Status",
+            "mdi:waveform",
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return current operational state of the Twinkly Music dongle."""
+        snap = self.coordinator.data
+        if not snap or not snap.online:
+            return "Offline (Unplugged)"
+        if snap.music.active or snap.music.enabled:
+            return "Active (Listening)"
+        return "Online (Standby)"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return hardware and audio driver metadata for the Music dongle."""
+        snap = self.coordinator.data
+        if not snap:
+            return {}
+        return {
+            "online": snap.online,
+            "host": snap.host or "Not in LAN",
+            "mac": snap.gestalt.mac,
+            "uuid": snap.gestalt.uuid,
+            "product_code": snap.gestalt.product_code or "TMD01USB",
+            "firmware_version": snap.fw_version,
+            "music_mode": snap.music.mode,
+            "available_drivers": len(snap.music.drivers),
+            "sensitivity": snap.music.sensitivity,
         }

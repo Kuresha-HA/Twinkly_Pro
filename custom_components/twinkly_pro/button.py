@@ -1,4 +1,4 @@
-"""Button entities for Twinkly Pro (Next Track, Previous Track, Leave Sync Group)."""
+"""Button entities for Twinkly Pro (separate buttons for LED Garlands vs Twinkly Music)."""
 
 from __future__ import annotations
 
@@ -17,10 +17,19 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro button entities."""
+    """Set up Twinkly Pro button entities depending on device type."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
+    if coordinator.is_music_dongle:
+        async_add_entities(
+            [
+                TwinklyNextMusicPresetButton(coordinator),
+                TwinklyPrevMusicPresetButton(coordinator),
+            ]
+        )
+        return
+
     async_add_entities(
         [
             TwinklyNextTrackButton(coordinator),
@@ -42,7 +51,7 @@ class _TwinklyBaseButton(CoordinatorEntity[TwinklyProCoordinator], ButtonEntity)
         super().__init__(coordinator)
         mac = (
             coordinator.data.gestalt.mac
-            if coordinator.data
+            if coordinator.data and coordinator.data.gestalt.mac
             else coordinator.entry.data.get("mac", coordinator.host)
         )
         self._attr_unique_id = f"{mac}_{key}"
@@ -52,7 +61,7 @@ class _TwinklyBaseButton(CoordinatorEntity[TwinklyProCoordinator], ButtonEntity)
 
 
 class TwinklyNextTrackButton(_TwinklyBaseButton):
-    """Button to advance to the next playlist entry or stored movie."""
+    """Button to advance to the next playlist entry or stored movie on a garland."""
 
     def __init__(self, coordinator: TwinklyProCoordinator) -> None:
         """Initialize Next Track button."""
@@ -66,7 +75,7 @@ class TwinklyNextTrackButton(_TwinklyBaseButton):
 
 
 class TwinklyPrevTrackButton(_TwinklyBaseButton):
-    """Button to return to the previous playlist entry or stored movie."""
+    """Button to return to the previous playlist entry or stored movie on a garland."""
 
     def __init__(self, coordinator: TwinklyProCoordinator) -> None:
         """Initialize Previous Track button."""
@@ -83,7 +92,7 @@ class TwinklyPrevTrackButton(_TwinklyBaseButton):
 
 
 class TwinklyLeaveGroupButton(_TwinklyBaseButton):
-    """Button to remove this controller from any Master/Slave sync group."""
+    """Button to remove a garland controller from any Master/Slave sync group."""
 
     def __init__(self, coordinator: TwinklyProCoordinator) -> None:
         """Initialize Leave Sync Group button."""
@@ -96,5 +105,37 @@ class TwinklyLeaveGroupButton(_TwinklyBaseButton):
 
     async def async_press(self) -> None:
         """Set sync mode to none."""
-        await self.coordinator.client.set_sync(mode="none")
-        await self.coordinator.async_request_refresh()
+        if self.coordinator.host:
+            await self.coordinator.client.set_sync(mode="none")
+            await self.coordinator.async_request_refresh()
+
+
+class TwinklyNextMusicPresetButton(_TwinklyBaseButton):
+    """Button to switch to the next audio-reactive preset on a Twinkly Music dongle."""
+
+    def __init__(self, coordinator: TwinklyProCoordinator) -> None:
+        """Initialize Next Music Preset button."""
+        super().__init__(
+            coordinator, "next_music_preset", "Next Music Preset", "mdi:skip-next"
+        )
+
+    async def async_press(self) -> None:
+        """Advance to the next music driver."""
+        await self.coordinator.async_step_music_driver(step=1)
+
+
+class TwinklyPrevMusicPresetButton(_TwinklyBaseButton):
+    """Button to switch to the previous audio-reactive preset on a Twinkly Music dongle."""
+
+    def __init__(self, coordinator: TwinklyProCoordinator) -> None:
+        """Initialize Previous Music Preset button."""
+        super().__init__(
+            coordinator,
+            "prev_music_preset",
+            "Previous Music Preset",
+            "mdi:skip-previous",
+        )
+
+    async def async_press(self) -> None:
+        """Return to the previous music driver."""
+        await self.coordinator.async_step_music_driver(step=-1)

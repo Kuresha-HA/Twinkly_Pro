@@ -6,7 +6,7 @@ from typing import Final
 
 DOMAIN: Final = "twinkly_pro"
 NAME: Final = "Twinkly Pro"
-VERSION: Final = "0.2.2"
+VERSION: Final = "0.2.3"
 
 # Configuration keys
 CONF_HOST: Final = "host"

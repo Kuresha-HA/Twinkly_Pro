@@ -64,6 +64,20 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
+    @property
+    def is_music_dongle(self) -> bool:
+        """Return True if this coordinator manages a Twinkly Music USB dongle (TMD01USB)."""
+        if self.data and self.data.gestalt.is_music_dongle:
+            return True
+        pcode = str(self.entry.data.get(CONF_PRODUCT_CODE, "")).upper()
+        profile = str(self.entry.data.get(CONF_LED_PROFILE, "")).upper()
+        dname = str(self.entry.data.get(CONF_DEVICE_NAME, "")).lower()
+        return (
+            pcode.startswith("TMD")
+            or profile == "MUSIC"
+            or "twinkly music" in dname
+        )
+
     def _build_offline_snapshot(self) -> TwinklyDeviceSnapshot:
         """Build a fallback snapshot from ConfigEntry metadata when a Cloud device is unplugged/offline."""
         d = self.entry.data
@@ -317,6 +331,38 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             activate_music_mode=True,
         )
         await target.async_request_refresh()
+
+    async def async_set_mic_sensitivity(self, sensitivity_0_100: int) -> None:
+        """Set microphone sensitivity (0..100%) on Twinkly Music dongle."""
+        clamped = max(0, min(100, int(sensitivity_0_100)))
+        if self.data:
+            self.data.music.sensitivity = clamped
+        if self.host:
+            try:
+                await self.client._request(
+                    "POST",
+                    "music/sensitivity",
+                    json_data={"sensitivity": clamped},
+                )
+            except TwinklyError:
+                pass
+        self.async_update_listeners()
+
+    async def async_step_music_driver(self, step: int = 1) -> None:
+        """Cycle to next (+1) or previous (-1) music preset on Twinkly Music dongle."""
+        snap = self.data
+        if not snap or not self.host:
+            return
+        drivers = snap.music.drivers
+        if not drivers:
+            await self.client.set_music_enabled(True)
+            await self.async_request_refresh()
+            return
+        ids = [d.id for d in drivers]
+        curr_id = snap.music.current_driver_id
+        curr_pos = ids.index(curr_id) if curr_id in ids else 0
+        next_driver = drivers[(curr_pos + step) % len(drivers)]
+        await self.async_select_music_driver(next_driver.id, next_driver.unique_id)
 
     async def async_start_rt_effect(
         self,

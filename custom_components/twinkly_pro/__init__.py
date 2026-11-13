@@ -52,6 +52,32 @@ except ImportError:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _async_cleanup_music_dongle_entities(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Remove garland-only entities from entity registry if attached to a Twinkly Music dongle."""
+    from homeassistant.helpers import entity_registry as er
+
+    ent_reg = er.async_get(hass)
+    garland_suffixes = (
+        "_light",
+        "_operating_mode",
+        "_active_movie",
+        "_playlist_track",
+        "_live_rt_preset",
+        "_brightness_pct",
+        "_next_effect",
+        "_prev_effect",
+        "_leave_sync_group",
+        "_sync_group_role",
+        "_flash_memory_used",
+        "_led_count",
+    )
+    for reg_entry in list(er.async_entries_for_config_entry(ent_reg, entry.entry_id)):
+        if reg_entry.unique_id.endswith(garland_suffixes):
+            ent_reg.async_remove(reg_entry.entity_id)
+
+
 def _resolve_coordinator(
     hass: HomeAssistant, entry_id: str | None = None
 ) -> TwinklyProCoordinator | None:
@@ -92,11 +118,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         },
     )
 
-    host = str(entry.data[CONF_HOST])
+    host = str(entry.data.get(CONF_HOST, ""))
     coordinator = TwinklyProCoordinator(hass, entry, host=host)
     await coordinator.async_config_entry_first_refresh()
 
     hass.data[DOMAIN]["coordinators"][entry.entry_id] = coordinator
+
+    if coordinator.is_music_dongle:
+        _async_cleanup_music_dongle_entities(hass, entry)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -295,6 +324,7 @@ def _serialize_coordinator(
         "entry_id": entry_id,
         "host": snap.host,
         "online": snap.online,
+        "is_music_dongle": coord.is_music_dongle,
         "name": snap.gestalt.device_name,
         "mac": snap.gestalt.mac,
         "uuid": snap.gestalt.uuid,

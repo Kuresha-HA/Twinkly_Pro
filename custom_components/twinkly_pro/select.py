@@ -17,10 +17,14 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Twinkly Pro select entities."""
+    """Set up Twinkly Pro select entities based on device type (Garland vs Twinkly Music dongle)."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
+    if coordinator.is_music_dongle:
+        async_add_entities([TwinklyMusicDriverSelect(coordinator)])
+        return
+
     async_add_entities(
         [
             TwinklyModeSelect(coordinator),

@@ -32,10 +32,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Twinkly Pro Light entity from a config entry."""
+    """Set up the Twinkly Pro Light entity from a config entry (only for LED garlands, not Music dongles)."""
     coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
         entry.entry_id
     ]
+    if coordinator.is_music_dongle:
+        return
     async_add_entities([TwinklyProLight(coordinator)])
 
 
