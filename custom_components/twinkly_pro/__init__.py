@@ -135,20 +135,78 @@ def _async_cleanup_unsupported_entities(
             ent_reg.async_remove(reg_entry.entity_id)
 
 
+def _sync_active_coordinators(
+    hass: HomeAssistant,
+) -> dict[str, TwinklyProCoordinator]:
+    """Rebuild hass.data[DOMAIN]['coordinators'] strictly from active ConfigEntries, purging any stale/orphaned devices."""
+    domain_data = hass.data.setdefault(
+        DOMAIN,
+        {
+            "coordinators": {},
+            "entry_coordinators": {},
+            "forwarded_entries": set(),
+            "panel_registered": False,
+            "ws_registered": False,
+        },
+    )
+    entry_coordinators: dict[str, list[TwinklyProCoordinator]] = (
+        domain_data.setdefault("entry_coordinators", {})
+    )
+    old_coordinators: dict[str, TwinklyProCoordinator] = domain_data.get(
+        "coordinators", {}
+    )
+
+    active_entries = hass.config_entries.async_entries(DOMAIN)
+    active_entry_ids = {e.entry_id for e in active_entries}
+
+    # 1. Remove any entry_coordinators belonging to deleted/unloaded ConfigEntries
+    for eid in list(entry_coordinators.keys()):
+        if eid not in active_entry_ids:
+            stale_list = entry_coordinators.pop(eid, [])
+            for c in stale_list:
+                hass.async_create_task(c.async_shutdown())
+
+    # 2. Order active entries so multi-device entries take priority over redundant single-device entries
+    ordered_entries = sorted(
+        active_entries,
+        key=lambda e: (
+            0
+            if isinstance(e.data.get(CONF_DEVICES), list)
+            and len(e.data[CONF_DEVICES]) > 1
+            else 1
+        ),
+    )
+
+    fresh_coordinators: dict[str, TwinklyProCoordinator] = {}
+    active_coord_objs: set[int] = set()
+    for entry in ordered_entries:
+        for coord in entry_coordinators.get(entry.entry_id, []):
+            if coord.coord_id not in fresh_coordinators:
+                fresh_coordinators[coord.coord_id] = coord
+                active_coord_objs.add(id(coord))
+
+    # 3. Shut down any orphaned coordinator objects left over from older versions (e.g. Curtain-Left / Curtain-Right)
+    for old_coord in old_coordinators.values():
+        if id(old_coord) not in active_coord_objs:
+            hass.async_create_task(old_coord.async_shutdown())
+
+    domain_data["coordinators"] = fresh_coordinators
+    return fresh_coordinators
+
+
 def _resolve_coordinator(
     hass: HomeAssistant, entry_id: str | None = None
 ) -> TwinklyProCoordinator | None:
     """Find a target TwinklyProCoordinator by coord_id/entry_id or return the first available."""
-    domain_data = hass.data.get(DOMAIN, {})
-    coordinators: dict[str, TwinklyProCoordinator] = domain_data.get(
-        "coordinators", {}
-    )
+    coordinators = _sync_active_coordinators(hass)
     if not coordinators:
         return None
     if entry_id:
         if entry_id in coordinators:
             return coordinators[entry_id]
-        entry_list = domain_data.get("entry_coordinators", {}).get(entry_id)
+        entry_list = (
+            hass.data.get(DOMAIN, {}).get("entry_coordinators", {}).get(entry_id)
+        )
         if entry_list:
             return entry_list[0]
     return next(iter(coordinators.values()))
@@ -161,6 +219,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         {
             "coordinators": {},
             "entry_coordinators": {},
+            "forwarded_entries": set(),
             "panel_registered": False,
             "ws_registered": False,
         },
@@ -170,6 +229,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Twinkly Pro from a config entry (supports single or multi-device entries)."""
+    from homeassistant.helpers import device_registry as dr
     from .coordinator import TwinklyProCoordinator
 
     hass.data.setdefault(
@@ -177,18 +237,99 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         {
             "coordinators": {},
             "entry_coordinators": {},
+            "forwarded_entries": set(),
             "panel_registered": False,
             "ws_registered": False,
         },
     )
     hass.data[DOMAIN].setdefault("entry_coordinators", {})
+    forwarded_entries: set[str] = hass.data[DOMAIN].setdefault(
+        "forwarded_entries", set()
+    )
 
+    all_entries = hass.config_entries.async_entries(DOMAIN)
     raw_devices = entry.data.get(CONF_DEVICES)
+    is_multi_entry = isinstance(raw_devices, list) and len(raw_devices) > 1
+
+    # Check if this is a redundant single-device entry whose MAC is already inside a multi-device entry
+    if not is_multi_entry:
+        single_mac = str(
+            entry.data.get(CONF_MAC)
+            or (
+                raw_devices[0].get(CONF_MAC)
+                if isinstance(raw_devices, list) and raw_devices
+                else ""
+            )
+            or entry.unique_id
+            or ""
+        ).lower()
+        single_host = str(entry.data.get(CONF_HOST, "")).strip()
+        for other in all_entries:
+            if other.entry_id == entry.entry_id:
+                continue
+            other_devs = other.data.get(CONF_DEVICES)
+            if isinstance(other_devs, list) and len(other_devs) > 1:
+                other_macs = {
+                    str(d.get(CONF_MAC, "")).lower()
+                    for d in other_devs
+                    if isinstance(d, dict) and d.get(CONF_MAC)
+                }
+                if single_mac and single_mac in other_macs:
+                    # Propagate IP if needed and auto-remove the duplicate single-device entry
+                    if single_host:
+                        for c in (
+                            hass.data[DOMAIN]
+                            .get("entry_coordinators", {})
+                            .get(other.entry_id, [])
+                        ):
+                            if c.coord_id.lower() == single_mac:
+                                c.update_host(single_host)
+                                hass.async_create_task(c.async_request_refresh())
+                    hass.async_create_task(
+                        hass.config_entries.async_remove(entry.entry_id)
+                    )
+                    return True
+
     device_configs: list[dict[str, Any]]
     if isinstance(raw_devices, list) and raw_devices:
         device_configs = [dict(d) for d in raw_devices if isinstance(d, dict)]
     else:
         device_configs = [dict(entry.data)]
+
+    # If this is a multi-device entry, also schedule removal of any existing duplicate single-device entries
+    if is_multi_entry:
+        multi_macs = {
+            str(d.get(CONF_MAC, "")).lower()
+            for d in device_configs
+            if d.get(CONF_MAC)
+        }
+        for other in all_entries:
+            if other.entry_id == entry.entry_id:
+                continue
+            other_devs = other.data.get(CONF_DEVICES)
+            if not isinstance(other_devs, list) or len(other_devs) <= 1:
+                other_mac = str(
+                    other.data.get(CONF_MAC)
+                    or (
+                        other_devs[0].get(CONF_MAC)
+                        if isinstance(other_devs, list) and other_devs
+                        else ""
+                    )
+                    or other.unique_id
+                    or ""
+                ).lower()
+                if other_mac and other_mac in multi_macs:
+                    other_host = str(other.data.get(CONF_HOST, "")).strip()
+                    if other_host:
+                        for d in device_configs:
+                            if (
+                                str(d.get(CONF_MAC, "")).lower() == other_mac
+                                and not d.get(CONF_HOST)
+                            ):
+                                d[CONF_HOST] = other_host
+                    hass.async_create_task(
+                        hass.config_entries.async_remove(other.entry_id)
+                    )
 
     entry_coords: list[TwinklyProCoordinator] = []
     for idx, dev_cfg in enumerate(device_configs):
@@ -209,8 +350,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     hass.data[DOMAIN]["entry_coordinators"][entry.entry_id] = entry_coords
+    _sync_active_coordinators(hass)
+
+    # Clean up any stale devices or unsupported entities in HA registries for this entry
+    dev_reg = dr.async_get(hass)
+    valid_macs = {c.coord_id.lower() for c in entry_coords}
+    for dev_entry in list(dr.async_entries_for_config_entry(dev_reg, entry.entry_id)):
+        dev_macs = {
+            ident[1].lower()
+            for ident in dev_entry.identifiers
+            if ident[0] == DOMAIN
+        }
+        if dev_macs and not (dev_macs & valid_macs):
+            dev_reg.async_remove_device(dev_entry.id)
+
     for c in entry_coords:
-        hass.data[DOMAIN]["coordinators"][c.coord_id] = c
         mac_prefix = (
             c.data.gestalt.mac
             if c.data and c.data.gestalt.mac
@@ -221,6 +375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    forwarded_entries.add(entry.entry_id)
 
     # Register services, WebSocket API, and Twinkly Studio web panel once
     _async_register_services(hass)
@@ -232,17 +387,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a Twinkly Pro config entry."""
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    domain_data = hass.data.get(DOMAIN, {})
+    forwarded_entries: set[str] = domain_data.get("forwarded_entries", set())
+    if entry.entry_id in forwarded_entries:
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        if unload_ok:
+            forwarded_entries.discard(entry.entry_id)
+    else:
+        unload_ok = True
+
     if unload_ok:
-        coordinators: dict[str, TwinklyProCoordinator] = hass.data[DOMAIN][
-            "coordinators"
-        ]
-        entry_coords: list[TwinklyProCoordinator] = hass.data[DOMAIN].get(
+        entry_coords: list[TwinklyProCoordinator] = domain_data.get(
             "entry_coordinators", {}
         ).pop(entry.entry_id, [])
+        coordinators: dict[str, TwinklyProCoordinator] = domain_data.get(
+            "coordinators", {}
+        )
+        coordinators.pop(entry.entry_id, None)
         for c in entry_coords:
             coordinators.pop(c.coord_id, None)
             await c.async_shutdown()
+        _sync_active_coordinators(hass)
 
     return unload_ok
 
@@ -337,7 +502,7 @@ async def _async_configure_group_internal(
     slave_entry_ids: list[str],
 ) -> dict[str, Any]:
     """Configure Master/Slave group synchronization across selected controllers."""
-    coordinators: dict[str, TwinklyProCoordinator] = hass.data[DOMAIN]["coordinators"]
+    coordinators = _sync_active_coordinators(hass)
     master_coord = coordinators.get(master_entry_id)
     if not master_coord:
         raise ValueError(f"Master entry_id '{master_entry_id}' not found")
@@ -523,9 +688,7 @@ if _HAS_HA:
         msg: dict[str, Any],
     ) -> None:
         """Return full state of all Twinkly Pro devices, presets, and gallery."""
-        coordinators: dict[str, TwinklyProCoordinator] = hass.data.get(
-            DOMAIN, {}
-        ).get("coordinators", {})
+        coordinators = _sync_active_coordinators(hass)
         devices = [
             _serialize_coordinator(entry_id, coord)
             for entry_id, coord in coordinators.items()
@@ -710,9 +873,7 @@ if _HAS_HA:
                 master_entry_id=str(msg["master_entry_id"]),
                 slave_entry_ids=[str(x) for x in msg.get("slave_entry_ids", [])],
             )
-            coordinators: dict[str, TwinklyProCoordinator] = hass.data[DOMAIN][
-                "coordinators"
-            ]
+            coordinators = _sync_active_coordinators(hass)
             devices = [
                 _serialize_coordinator(entry_id, coord)
                 for entry_id, coord in coordinators.items()

@@ -590,14 +590,16 @@ class DeviceCapabilities:
                 tile_count=tile_count,
             )
 
-        if probed and device_category != "music_dongle":
+        # Only apply live HTTP probe overrides when product_code is absent/unknown.
+        # For known Gen II hardware (e.g. TWS250SPP, TWW400SPP), capabilities must be 100%
+        # deterministic so online and offline devices always expose identical entities (13 entities).
+        if probed and device_category != "music_dongle" and not pcode:
             for flag in (
                 "supports_brightness",
                 "supports_color_mode",
                 "supports_multi_movies",
                 "supports_playlists",
                 "supports_music_reactive",
-                "supports_sync_group",
             ):
                 if flag in probed:
                     setattr(caps, flag, bool(probed[flag]))

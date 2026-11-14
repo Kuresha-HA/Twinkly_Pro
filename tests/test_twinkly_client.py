@@ -642,3 +642,83 @@ def test_real_cloud_camelcase_and_stale_unlinked_filtering() -> None:
     assert music_dev.online is True
 
 
+@pytest.mark.asyncio
+async def test_gen2_garland_keeps_all_13_capabilities_when_sync_404() -> None:
+    """Verify Gen II garland (TWS250SPP hwVersion 100) retains all 13 capabilities and software sync when /xled/v1/sync returns 404."""
+
+    async def handle_gestalt(request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "device_name": "String-Kitchen",
+                "product_code": "TWS250SPP",
+                "hardware_version": "100",
+                "fw_family": "G",
+                "mac": "fc:f5:c4:7a:08:fd",
+                "uuid": "472BC005-1D3B-4315-AFF6-ED689A937FE7",
+                "number_of_led": 250,
+                "led_profile": "RGBW",
+                "bytes_per_led": 4,
+                "code": 1000,
+            }
+        )
+
+    async def handle_login(request: web.Request) -> web.Response:
+        return web.json_response({"authentication_token": "AAECAwQFBgc=", "code": 1000})
+
+    async def handle_verify(request: web.Request) -> web.Response:
+        return web.json_response({"code": 1000})
+
+    async def handle_ok(request: web.Request) -> web.Response:
+        return web.json_response({"mode": "off", "code": 1000})
+
+    async def handle_sync_404(request: web.Request) -> web.Response:
+        return web.Response(status=404, text="Not Found")
+
+    app = web.Application()
+    app.router.add_get("/xled/v1/gestalt", handle_gestalt)
+    app.router.add_post("/xled/v1/login", handle_login)
+    app.router.add_post("/xled/v1/verify", handle_verify)
+    app.router.add_get("/xled/v1/led/mode", handle_ok)
+    app.router.add_get("/xled/v1/led/out/brightness", handle_ok)
+    app.router.add_get("/xled/v1/led/color", handle_ok)
+    app.router.add_get("/xled/v1/sync", handle_sync_404)
+    app.router.add_post("/xled/v1/sync", handle_sync_404)
+    app.router.add_get("/xled/v1/movies", handle_ok)
+    app.router.add_get("/xled/v1/playlist", handle_ok)
+    app.router.add_get("/xled/v1/music/drivers", handle_ok)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+
+    client = TwinklyClient(host="127.0.0.1", port=port)
+    try:
+        snap = await client.fetch_full_snapshot()
+        caps = snap.capabilities
+        assert caps.generation == 2
+        assert caps.supports_light is True
+        assert caps.supports_brightness is True
+        assert caps.supports_color_mode is True
+        assert caps.supports_multi_movies is True
+        assert caps.supports_playlists is True
+        assert caps.supports_music_reactive is True
+        assert caps.supports_sync_group is True
+        assert caps.supports_rt_streaming is True
+
+        # Verify software sync fallback works cleanly even when /xled/v1/sync returns 404
+        await client.set_sync(mode="slave", group_uid="grp_kitchen", master_uid="uuid_master", slave_id=1)
+        sync_state = await client.get_sync()
+        assert sync_state.is_slave is True
+        assert sync_state.group_uid == "grp_kitchen"
+
+        await client.set_sync(mode="none")
+        sync_reset = await client.get_sync()
+        assert sync_reset.mode == "none"
+    finally:
+        await client.close()
+        await runner.cleanup()
+
+
+

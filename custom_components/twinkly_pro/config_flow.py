@@ -408,6 +408,55 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_create_entry(title=title, data=import_data)
 
+    def _update_configured_device_host(self, mac_id: str, host: str) -> None:
+        """Update IP address of an already-configured device in multi-device or single-device entries and refresh its coordinator."""
+        mac_clean = mac_id.lower().strip()
+        host_clean = host.strip()
+        if not mac_clean or not host_clean:
+            return
+
+        # 1. Update any matching active coordinator and request immediate refresh
+        domain_data = self.hass.data.get(DOMAIN, {})
+        seen_coords: set[int] = set()
+        all_coords = list(domain_data.get("coordinators", {}).values())
+        for coord_list in domain_data.get("entry_coordinators", {}).values():
+            if isinstance(coord_list, list):
+                all_coords.extend(coord_list)
+
+        for coord in all_coords:
+            if id(coord) in seen_coords:
+                continue
+            seen_coords.add(id(coord))
+            coord_mac = str(coord.device_config.get(CONF_MAC, coord.coord_id)).lower()
+            if coord_mac == mac_clean or coord.coord_id.lower() == mac_clean:
+                coord.update_host(host_clean)
+                self.hass.async_create_task(coord.async_request_refresh())
+
+        # 2. Persist updated host in ConfigEntry data if needed
+        for entry in self._async_current_entries():
+            changed = False
+            new_data = dict(entry.data)
+            if str(new_data.get(CONF_MAC, "")).lower() == mac_clean:
+                if new_data.get(CONF_HOST) != host_clean:
+                    new_data[CONF_HOST] = host_clean
+                    changed = True
+            raw_devs = new_data.get(CONF_DEVICES)
+            if isinstance(raw_devs, list):
+                updated_devs = []
+                for item in raw_devs:
+                    if (
+                        isinstance(item, dict)
+                        and str(item.get(CONF_MAC, "")).lower() == mac_clean
+                        and item.get(CONF_HOST) != host_clean
+                    ):
+                        item = {**item, CONF_HOST: host_clean}
+                        changed = True
+                    updated_devs.append(item)
+                if changed:
+                    new_data[CONF_DEVICES] = updated_devs
+            if changed:
+                self.hass.config_entries.async_update_entry(entry, data=new_data)
+
     async def _async_handle_network_discovery(
         self, host: str
     ) -> ConfigFlowResult:
@@ -415,12 +464,25 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         if not host:
             return self.async_abort(reason="cannot_connect")
 
+        configured_ids, configured_hosts = self._get_configured_ids_and_hosts()
+
         session = async_get_clientsession(self.hass)
         probed = await async_probe_discovered_host(host=host, session=session)
         if not probed:
+            if host.lower() in configured_hosts:
+                return self.async_abort(reason="already_configured")
             return self.async_abort(reason="cannot_connect")
 
         await self.async_set_unique_id(probed.unique_id)
+
+        # Check both top-level entry unique_ids AND devices nested inside multi-device entries (CONF_DEVICES)
+        if (
+            probed.unique_id.lower() in configured_ids
+            or host.lower() in configured_hosts
+        ):
+            self._update_configured_device_host(probed.unique_id, host)
+            return self.async_abort(reason="already_configured")
+
         self._abort_if_unique_id_configured(updates={CONF_HOST: host})
 
         self._single_discovered = probed

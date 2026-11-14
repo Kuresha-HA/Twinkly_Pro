@@ -68,6 +68,7 @@ class TwinklyClient:
         self._cached_fw_version: str | None = None
         self._cached_layout: DeviceLayout | None = None
         self._probed_features: dict[str, bool] = {}
+        self._software_sync: SyncInfo = SyncInfo()
 
     @property
     def raw_token(self) -> bytes | None:
@@ -355,19 +356,20 @@ class TwinklyClient:
     # -------------------------------------------------------------------------
 
     async def get_sync(self) -> SyncInfo:
-        """Fetch group sync configuration from /xled/v1/sync."""
+        """Fetch group sync configuration from /xled/v1/sync (with software fallback for hwVersion 100)."""
         try:
             data = await self._request("GET", "sync")
             if data.get("code", 1000) != 1000:
-                self._probed_features["supports_sync_group"] = False
-                return SyncInfo()
+                return self._software_sync
             self._probed_features["supports_sync_group"] = True
-            return SyncInfo.from_dict(data)
+            self._software_sync = SyncInfo.from_dict(data)
+            return self._software_sync
         except TwinklyConnectionError:
-            return SyncInfo()
+            return self._software_sync
         except TwinklyError:
-            self._probed_features["supports_sync_group"] = False
-            return SyncInfo()
+            # Some Gen II revisions (e.g. TWS250SPP hwVersion 100 on FW 2.11.0) omit HTTP /xled/v1/sync;
+            # keep supports_sync_group enabled and return software sync state.
+            return self._software_sync
 
     async def set_sync(
         self,
@@ -379,18 +381,32 @@ class TwinklyClient:
     ) -> None:
         """Configure device group synchronization role (none, master, slave)."""
         mode_clean = mode.lower()
+        effective_group_uid = (
+            (group_uid or uuid.uuid4().hex) if mode_clean == "master" else (group_uid if mode_clean == "slave" else "")
+        )
+        self._software_sync = SyncInfo(
+            mode=mode_clean,
+            group_uid=effective_group_uid,
+            master_uid=master_uid if mode_clean == "slave" else "",
+            slave_id=slave_id if mode_clean == "slave" else 0,
+            compat_mode=compat_mode,
+        )
         sync_payload: dict[str, Any] = {"mode": mode_clean}
         if mode_clean == "master":
-            sync_payload["group_uid"] = group_uid or uuid.uuid4().hex
+            sync_payload["group_uid"] = effective_group_uid
             sync_payload["compat_mode"] = compat_mode
         elif mode_clean == "slave":
-            sync_payload["group_uid"] = group_uid
+            sync_payload["group_uid"] = effective_group_uid
             if master_uid:
                 sync_payload["master_uid"] = master_uid
             sync_payload["slave_id"] = slave_id
             sync_payload["compat_mode"] = compat_mode
 
-        await self._request("POST", "sync", json_data={"sync": sync_payload})
+        try:
+            await self._request("POST", "sync", json_data={"sync": sync_payload})
+        except TwinklyError:
+            # Hardware without HTTP /xled/v1/sync still participates via TwinklyProCoordinator software routing
+            pass
 
     # -------------------------------------------------------------------------
     # Spatial Layout (2D / 3D coordinates)
