@@ -12,7 +12,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import TwinklyProCoordinator
+from .coordinator import TwinklyProCoordinator, get_entry_coordinators
 
 
 async def async_setup_entry(
@@ -21,23 +21,20 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Twinkly Pro sensor entities dynamically from DeviceCapabilities."""
-    coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
-        entry.entry_id
-    ]
-    caps = coordinator.capabilities
     entities: list[SensorEntity] = []
-
-    if caps.device_category == "music_dongle":
-        entities.append(TwinklyMusicDongleStatusSensor(coordinator))
-    else:
-        if caps.supports_sync_group:
-            entities.append(TwinklyGroupRoleSensor(coordinator))
-        if caps.supports_multi_movies:
-            entities.append(TwinklyFlashMemorySensor(coordinator))
-        if caps.supports_light:
-            entities.append(TwinklyLedCountSensor(coordinator))
-        if caps.is_matrix_tiles:
-            entities.append(TwinklyMatrixTilesSensor(coordinator))
+    for coordinator in get_entry_coordinators(hass, entry):
+        caps = coordinator.capabilities
+        if caps.device_category == "music_dongle":
+            entities.append(TwinklyMusicDongleStatusSensor(coordinator))
+        else:
+            if caps.supports_sync_group:
+                entities.append(TwinklyGroupRoleSensor(coordinator))
+            if caps.supports_multi_movies:
+                entities.append(TwinklyFlashMemorySensor(coordinator))
+            if caps.supports_light:
+                entities.append(TwinklyLedCountSensor(coordinator))
+            if caps.is_matrix_tiles:
+                entities.append(TwinklyMatrixTilesSensor(coordinator))
 
     if entities:
         async_add_entities(entities)
@@ -56,7 +53,7 @@ class _TwinklyBaseSensor(CoordinatorEntity[TwinklyProCoordinator], SensorEntity)
         mac = (
             coordinator.data.gestalt.mac
             if coordinator.data and coordinator.data.gestalt.mac
-            else coordinator.entry.data.get("mac", coordinator.host)
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_{key}"
         self._attr_name = name
@@ -155,7 +152,7 @@ class TwinklyLedCountSensor(_TwinklyBaseSensor):
         """Return total number of LEDs on the device."""
         snap = self.coordinator.data
         if not snap:
-            return int(self.coordinator.entry.data.get("number_of_led", 0))
+            return int(self.coordinator.device_config.get("number_of_led", 0))
         return snap.gestalt.number_of_led
 
     @property

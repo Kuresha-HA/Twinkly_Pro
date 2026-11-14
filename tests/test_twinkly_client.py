@@ -530,3 +530,115 @@ def test_cloud_deleted_devices_filtered_and_split() -> None:
     assert devs[0].name == "Active Garland"
 
 
+def test_real_cloud_camelcase_and_stale_unlinked_filtering() -> None:
+    """Verify camelCase cloud payload parsing and filtering of stale unlinked devices (e.g. Curtain-Left/Right)."""
+    cloud_inv = {
+        "devices": [
+            {
+                "id": 2119972,
+                "uniqueId": "AC7975BD-3826-4A41-B4CB-5E55D6216F14",
+                "family": 1,
+                "name": "Curtain-400",
+                "firmware": "2.11.0",
+                "ip": "192.168.1.194",
+                "productCode": "TWW400SPP",
+                "mac": "ec:62:60:2e:20:4d",
+                "ledCount": 400,
+                "ledProfile": "RGBW",
+                "created": "2026-11-13T14:54:41Z",
+                "updated": "2026-11-13T22:27:44Z",
+            },
+            {
+                "id": 353943,
+                "uniqueId": "0C97122F-2A9B-4F78-9A58-8A6C2D171372",
+                "family": 5,
+                "name": "Twinkly Music",
+                "firmware": "2.1.2",
+                "ip": "192.168.1.195",
+                "productCode": "TMD01USB",
+                "mac": "ac:67:b2:41:19:3d",
+                "ledCount": 0,
+                "ledProfile": "RGB",
+                "created": "2020-12-07T10:04:02Z",
+                "updated": "2025-12-03T18:45:10Z",
+            },
+            {
+                "id": 353955,
+                "uniqueId": "8B8B8D0C-C264-4CB3-A523-213E15D44835",
+                "family": 1,
+                "name": "Curtain-Left",
+                "firmware": "2.9.1",
+                "ip": "192.168.1.198",
+                "productCode": "TWW210SPP",
+                "mac": "98:f4:ab:37:dd:31",
+                "ledCount": 210,
+                "ledProfile": "RGBW",
+                "created": "2020-12-07T10:11:06Z",
+                "updated": "2026-02-14T09:25:26Z",
+            },
+            {
+                "id": 359257,
+                "uniqueId": "55281F63-BAC4-4854-A158-FC2B76933158",
+                "family": 1,
+                "name": "Curtain-Right",
+                "firmware": "2.9.1",
+                "ip": "192.168.1.199",
+                "productCode": "TWW210SPP",
+                "mac": "98:f4:ab:3d:ba:e1",
+                "ledCount": 210,
+                "ledProfile": "RGBW",
+                "created": "2020-12-08T14:22:37Z",
+                "updated": "2026-02-14T18:48:49Z",
+            },
+            {
+                "id": 400067,
+                "uniqueId": "472BC005-1D3B-4315-AFF6-ED689A937FE7",
+                "family": 1,
+                "name": "String-Kitchen",
+                "firmware": "2.11.0",
+                "ip": "192.168.1.197",
+                "productCode": "TWS250SPP",
+                "mac": "fc:f5:c4:7a:08:fd",
+                "ledCount": 250,
+                "ledProfile": "RGBW",
+                "created": "2020-12-19T14:46:35Z",
+                "updated": "2026-11-13T22:27:43Z",
+            },
+            {
+                "id": 410523,
+                "uniqueId": "9FC35E58-062A-43A6-A2F5-62AD29272B96",
+                "family": 1,
+                "name": "String",
+                "firmware": "2.11.0",
+                "ip": "192.168.1.196",
+                "productCode": "TWS250SPP",
+                "mac": "fc:f5:c4:79:80:dd",
+                "ledCount": 250,
+                "ledProfile": "RGBW",
+                "created": "2020-12-23T10:52:25Z",
+                "updated": "2026-11-13T18:35:27Z",
+            },
+        ],
+        "objects": [
+            {"name": "Curtain-400", "created": "2026-11-13T14:54:41Z"},
+            {"name": "Twinkly Music", "created": "2026-11-13T17:05:59Z"},
+            {"name": "Curtain-Left", "created": "2026-11-13T18:14:06Z"},
+            {"name": "Curtain-Right", "created": "2026-11-13T18:14:06Z"},
+            {"name": "String-Kitchen", "created": "2026-11-13T18:14:07Z"},
+            {"name": "String", "created": "2026-11-13T18:23:44Z"},
+        ],
+        "profile": [],
+    }
+    devs, _, _ = TwinklyCloudClient._parse_cloud_records(cloud_inv)
+    names = [d.name for d in devs]
+    assert names == ["Curtain-400", "Twinkly Music", "String-Kitchen", "String"]
+    string_dev = next(d for d in devs if d.name == "String")
+    assert string_dev.number_of_led == 250
+    assert string_dev.led_profile == "RGBW"
+    assert string_dev.product_code == "TWS250SPP"
+    music_dev = next(d for d in devs if d.name == "Twinkly Music")
+    assert music_dev.is_music_dongle is True
+    assert music_dev.host == "192.168.1.195"
+    assert music_dev.online is True
+
+

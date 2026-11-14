@@ -37,6 +37,7 @@ class DiscoveredTwinklyDevice:
     scene_name: str = ""
     composition_name: str = ""
     source: str = "lan"  # "lan", "cloud", "cloud+lan"
+    online: bool = True
 
     @property
     def unique_id(self) -> str:
@@ -78,8 +79,10 @@ class DiscoveredTwinklyDevice:
         elif self.composition_name:
             parts.append(f"[{self.composition_name}]")
 
-        if self.host:
+        if self.online and self.host:
             parts.append(f"IP: {self.host}")
+        elif self.host:
+            parts.append(f"Оффлайн в сети (последний IP: {self.host})")
         else:
             parts.append("Из облака (ожидает включения в сеть)")
         return " • ".join(parts)

@@ -6,9 +6,10 @@ from typing import Final
 
 DOMAIN: Final = "twinkly_pro"
 NAME: Final = "Twinkly Pro"
-VERSION: Final = "0.3.2"
+VERSION: Final = "0.4.0"
 
 # Configuration keys
+CONF_DEVICES: Final = "devices"
 CONF_HOST: Final = "host"
 CONF_MAC: Final = "mac"
 CONF_DEVICE_NAME: Final = "device_name"

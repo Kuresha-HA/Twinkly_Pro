@@ -24,6 +24,7 @@ from .const import (
     CONF_CLOUD_PASSWORD,
     CONF_COMPOSITION_NAME,
     CONF_DEVICE_NAME,
+    CONF_DEVICES,
     CONF_ENABLE_PANEL,
     CONF_GROUP_UID,
     CONF_HOST,
@@ -73,7 +74,7 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
         self._single_discovered: DiscoveredTwinklyDevice | None = None
 
     def _get_configured_ids_and_hosts(self) -> tuple[set[str], set[str]]:
-        """Return sets of already-configured unique_ids and hosts."""
+        """Return sets of already-configured unique_ids and hosts across single and multi-device entries."""
         configured_ids: set[str] = set()
         configured_hosts: set[str] = set()
         for entry in self._async_current_entries():
@@ -83,6 +84,14 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
                 configured_ids.add(str(entry.data[CONF_MAC]).lower())
             if entry.data.get(CONF_HOST):
                 configured_hosts.add(str(entry.data[CONF_HOST]).lower())
+            raw_devs = entry.data.get(CONF_DEVICES)
+            if isinstance(raw_devs, list):
+                for d in raw_devs:
+                    if isinstance(d, dict):
+                        if d.get(CONF_MAC):
+                            configured_ids.add(str(d[CONF_MAC]).lower())
+                        if d.get(CONF_HOST):
+                            configured_hosts.add(str(d[CONF_HOST]).lower())
         return configured_ids, configured_hosts
 
     def _build_entry_data(self, dev: DiscoveredTwinklyDevice) -> dict[str, Any]:
@@ -116,28 +125,34 @@ class TwinklyProConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _async_finalize_selected_devices(
         self, devices: list[DiscoveredTwinklyDevice]
     ) -> ConfigFlowResult:
-        """Create ConfigEntry for the first device and spawn background import flows for the rest."""
+        """Create a single ConfigEntry containing all selected devices so HA displays them all on the 'Name and assign area' screen."""
         if not devices:
             return self.async_abort(reason="no_devices_selected")
 
         primary = devices[0]
-        remaining = devices[1:]
+        devices_payload = [self._build_entry_data(d) for d in devices]
 
-        for extra_dev in remaining:
-            self.hass.async_create_task(
-                self.hass.config_entries.flow.async_init(
-                    DOMAIN,
-                    context={"source": "import_batch"},
-                    data=self._build_entry_data(extra_dev),
-                )
-            )
+        if len(devices) == 1:
+            unique_id = primary.unique_id
+            title = self._build_entry_title(primary)
+        else:
+            unique_id = f"batch_{primary.unique_id}"
+            if self._cloud_email:
+                title = f"Twinkly ({self._cloud_email} • {len(devices)} устр.)"
+            else:
+                title = f"Twinkly ({len(devices)} устр.)"
 
-        await self.async_set_unique_id(primary.unique_id, raise_on_progress=False)
+        await self.async_set_unique_id(unique_id, raise_on_progress=False)
         self._abort_if_unique_id_configured(updates={CONF_HOST: primary.host})
 
+        entry_data = {
+            **self._build_entry_data(primary),
+            CONF_DEVICES: devices_payload,
+        }
+
         return self.async_create_entry(
-            title=self._build_entry_title(primary),
-            data=self._build_entry_data(primary),
+            title=title,
+            data=entry_data,
         )
 
     def _clear_stale_flows(self) -> None:

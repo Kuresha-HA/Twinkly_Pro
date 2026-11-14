@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import ALL_MODES, BUILTIN_EFFECT_PRESETS, DOMAIN
-from .coordinator import TwinklyProCoordinator
+from .coordinator import TwinklyProCoordinator, get_entry_coordinators
 
 
 async def async_setup_entry(
@@ -18,22 +18,19 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Twinkly Pro select entities dynamically from DeviceCapabilities."""
-    coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
-        entry.entry_id
-    ]
-    caps = coordinator.capabilities
     entities: list[SelectEntity] = []
-
-    if caps.supports_light:
-        entities.append(TwinklyModeSelect(coordinator))
-    if caps.supports_multi_movies:
-        entities.append(TwinklyMovieSelect(coordinator))
-    if caps.supports_playlists:
-        entities.append(TwinklyPlaylistTrackSelect(coordinator))
-    if caps.supports_music_reactive:
-        entities.append(TwinklyMusicDriverSelect(coordinator))
-    if caps.supports_rt_streaming:
-        entities.append(TwinklyLivePresetSelect(coordinator))
+    for coordinator in get_entry_coordinators(hass, entry):
+        caps = coordinator.capabilities
+        if caps.supports_light:
+            entities.append(TwinklyModeSelect(coordinator))
+        if caps.supports_multi_movies:
+            entities.append(TwinklyMovieSelect(coordinator))
+        if caps.supports_playlists:
+            entities.append(TwinklyPlaylistTrackSelect(coordinator))
+        if caps.supports_music_reactive:
+            entities.append(TwinklyMusicDriverSelect(coordinator))
+        if caps.supports_rt_streaming:
+            entities.append(TwinklyLivePresetSelect(coordinator))
 
     if entities:
         async_add_entities(entities)
@@ -51,8 +48,8 @@ class _TwinklyBaseSelect(CoordinatorEntity[TwinklyProCoordinator], SelectEntity)
         super().__init__(coordinator)
         mac = (
             coordinator.data.gestalt.mac
-            if coordinator.data
-            else coordinator.entry.data.get("mac", coordinator.host)
+            if coordinator.data and coordinator.data.gestalt.mac
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_{key}"
         self._attr_name = name

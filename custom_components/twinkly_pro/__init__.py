@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -9,7 +10,9 @@ import uuid
 
 from .const import (
     BUILTIN_EFFECT_PRESETS,
+    CONF_DEVICES,
     CONF_HOST,
+    CONF_MAC,
     DOMAIN,
     PANEL_ICON,
     PANEL_STATIC_PATH,
@@ -54,7 +57,10 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _async_cleanup_unsupported_entities(
-    hass: HomeAssistant, entry: ConfigEntry, caps: DeviceCapabilities
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    caps: DeviceCapabilities,
+    mac_prefix: str = "",
 ) -> None:
     """Remove entities from HA entity registry that are unsupported by DeviceCapabilities."""
     from homeassistant.helpers import entity_registry as er
@@ -118,8 +124,11 @@ def _async_cleanup_unsupported_entities(
         "_matrix_tiles",
     )
 
+    prefix_lower = f"{mac_prefix.lower()}_" if mac_prefix else ""
     for reg_entry in list(er.async_entries_for_config_entry(ent_reg, entry.entry_id)):
         uid = reg_entry.unique_id
+        if prefix_lower and not uid.lower().startswith(prefix_lower):
+            continue
         if any(uid.endswith(s) for s in all_known_suffixes) and not any(
             uid.endswith(s) for s in supported_suffixes
         ):
@@ -129,14 +138,19 @@ def _async_cleanup_unsupported_entities(
 def _resolve_coordinator(
     hass: HomeAssistant, entry_id: str | None = None
 ) -> TwinklyProCoordinator | None:
-    """Find a target TwinklyProCoordinator by entry_id or return the first available."""
-    coordinators: dict[str, TwinklyProCoordinator] = hass.data.get(DOMAIN, {}).get(
+    """Find a target TwinklyProCoordinator by coord_id/entry_id or return the first available."""
+    domain_data = hass.data.get(DOMAIN, {})
+    coordinators: dict[str, TwinklyProCoordinator] = domain_data.get(
         "coordinators", {}
     )
     if not coordinators:
         return None
-    if entry_id and entry_id in coordinators:
-        return coordinators[entry_id]
+    if entry_id:
+        if entry_id in coordinators:
+            return coordinators[entry_id]
+        entry_list = domain_data.get("entry_coordinators", {}).get(entry_id)
+        if entry_list:
+            return entry_list[0]
     return next(iter(coordinators.values()))
 
 
@@ -146,6 +160,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
         DOMAIN,
         {
             "coordinators": {},
+            "entry_coordinators": {},
             "panel_registered": False,
             "ws_registered": False,
         },
@@ -154,25 +169,56 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up Twinkly Pro from a config entry."""
+    """Set up Twinkly Pro from a config entry (supports single or multi-device entries)."""
     from .coordinator import TwinklyProCoordinator
 
     hass.data.setdefault(
         DOMAIN,
         {
             "coordinators": {},
+            "entry_coordinators": {},
             "panel_registered": False,
             "ws_registered": False,
         },
     )
+    hass.data[DOMAIN].setdefault("entry_coordinators", {})
 
-    host = str(entry.data.get(CONF_HOST, ""))
-    coordinator = TwinklyProCoordinator(hass, entry, host=host)
-    await coordinator.async_config_entry_first_refresh()
+    raw_devices = entry.data.get(CONF_DEVICES)
+    device_configs: list[dict[str, Any]]
+    if isinstance(raw_devices, list) and raw_devices:
+        device_configs = [dict(d) for d in raw_devices if isinstance(d, dict)]
+    else:
+        device_configs = [dict(entry.data)]
 
-    hass.data[DOMAIN]["coordinators"][entry.entry_id] = coordinator
+    entry_coords: list[TwinklyProCoordinator] = []
+    for idx, dev_cfg in enumerate(device_configs):
+        host = str(dev_cfg.get(CONF_HOST, ""))
+        mac = str(dev_cfg.get(CONF_MAC, "")).lower()
+        coord_id = mac or f"{entry.entry_id}_{idx}"
+        coord = TwinklyProCoordinator(
+            hass,
+            entry,
+            host=host,
+            device_config=dev_cfg,
+            coord_id=coord_id,
+        )
+        entry_coords.append(coord)
 
-    _async_cleanup_unsupported_entities(hass, entry, coordinator.capabilities)
+    await asyncio.gather(
+        *(c.async_config_entry_first_refresh() for c in entry_coords)
+    )
+
+    hass.data[DOMAIN]["entry_coordinators"][entry.entry_id] = entry_coords
+    for c in entry_coords:
+        hass.data[DOMAIN]["coordinators"][c.coord_id] = c
+        mac_prefix = (
+            c.data.gestalt.mac
+            if c.data and c.data.gestalt.mac
+            else str(c.device_config.get(CONF_MAC, c.host))
+        )
+        _async_cleanup_unsupported_entities(
+            hass, entry, c.capabilities, mac_prefix=mac_prefix
+        )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -191,9 +237,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinators: dict[str, TwinklyProCoordinator] = hass.data[DOMAIN][
             "coordinators"
         ]
-        coordinator = coordinators.pop(entry.entry_id, None)
-        if coordinator:
-            await coordinator.async_shutdown()
+        entry_coords: list[TwinklyProCoordinator] = hass.data[DOMAIN].get(
+            "entry_coordinators", {}
+        ).pop(entry.entry_id, [])
+        for c in entry_coords:
+            coordinators.pop(c.coord_id, None)
+            await c.async_shutdown()
 
     return unload_ok
 
@@ -397,7 +446,7 @@ def _serialize_coordinator(
             "master_uid": snap.sync.master_uid,
             "slave_id": snap.sync.slave_id,
             "routed_to_master_entry_id": (
-                target.entry.entry_id if target is not coord else None
+                target.coord_id if target is not coord else None
             ),
         },
         "movies": {
@@ -547,7 +596,7 @@ if _HAS_HA:
 
             connection.send_result(
                 msg["id"],
-                {"device": _serialize_coordinator(coord.entry.entry_id, coord)},
+                {"device": _serialize_coordinator(coord.coord_id, coord)},
             )
         except Exception as err:
             _LOGGER.exception("Error in twinkly_pro/control_device")
@@ -599,7 +648,7 @@ if _HAS_HA:
                 msg["id"],
                 {
                     "movie_id": movie_id,
-                    "device": _serialize_coordinator(coord.entry.entry_id, coord),
+                    "device": _serialize_coordinator(coord.coord_id, coord),
                 },
             )
         except Exception as err:
@@ -635,7 +684,7 @@ if _HAS_HA:
             await target.async_request_refresh()
             connection.send_result(
                 msg["id"],
-                {"device": _serialize_coordinator(target.entry.entry_id, target)},
+                {"device": _serialize_coordinator(target.coord_id, target)},
             )
         except Exception as err:
             _LOGGER.exception("Error in twinkly_pro/save_playlist")

@@ -9,7 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import TwinklyProCoordinator
+from .coordinator import TwinklyProCoordinator, get_entry_coordinators
 
 
 async def async_setup_entry(
@@ -18,28 +18,26 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Twinkly Pro button entities dynamically from DeviceCapabilities."""
-    coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
-        entry.entry_id
-    ]
-    caps = coordinator.capabilities
     entities: list[ButtonEntity] = []
-    if caps.device_category == "music_dongle":
-        entities.extend(
-            [
-                TwinklyNextMusicPresetButton(coordinator),
-                TwinklyPrevMusicPresetButton(coordinator),
-            ]
-        )
-    else:
-        if caps.supports_playlists or caps.supports_multi_movies:
+    for coordinator in get_entry_coordinators(hass, entry):
+        caps = coordinator.capabilities
+        if caps.device_category == "music_dongle":
             entities.extend(
                 [
-                    TwinklyNextTrackButton(coordinator),
-                    TwinklyPrevTrackButton(coordinator),
+                    TwinklyNextMusicPresetButton(coordinator),
+                    TwinklyPrevMusicPresetButton(coordinator),
                 ]
             )
-        if caps.supports_sync_group:
-            entities.append(TwinklyLeaveGroupButton(coordinator))
+        else:
+            if caps.supports_playlists or caps.supports_multi_movies:
+                entities.extend(
+                    [
+                        TwinklyNextTrackButton(coordinator),
+                        TwinklyPrevTrackButton(coordinator),
+                    ]
+                )
+            if caps.supports_sync_group:
+                entities.append(TwinklyLeaveGroupButton(coordinator))
 
     if entities:
         async_add_entities(entities)
@@ -58,7 +56,7 @@ class _TwinklyBaseButton(CoordinatorEntity[TwinklyProCoordinator], ButtonEntity)
         mac = (
             coordinator.data.gestalt.mac
             if coordinator.data and coordinator.data.gestalt.mac
-            else coordinator.entry.data.get("mac", coordinator.host)
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_{key}"
         self._attr_name = name

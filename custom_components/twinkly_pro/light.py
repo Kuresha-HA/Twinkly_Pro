@@ -26,7 +26,7 @@ from .const import (
     LED_PROFILE_RGBW,
     MODE_OFF,
 )
-from .coordinator import TwinklyProCoordinator
+from .coordinator import TwinklyProCoordinator, get_entry_coordinators
 
 EFFECT_PREFIX_MOVIE = "Movie: "
 EFFECT_PREFIX_RT = "Live RT: "
@@ -39,13 +39,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Twinkly Pro Light entity if supported by device capabilities."""
-    coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
-        entry.entry_id
-    ]
-    if not coordinator.capabilities.supports_light:
-        return
-    async_add_entities([TwinklyProLight(coordinator)])
+    """Set up Twinkly Pro Light entities for all light-capable devices in the config entry."""
+    entities: list[LightEntity] = []
+    for coordinator in get_entry_coordinators(hass, entry):
+        if coordinator.capabilities.supports_light:
+            entities.append(TwinklyProLight(coordinator))
+    if entities:
+        async_add_entities(entities)
 
 
 class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
@@ -62,18 +62,18 @@ class TwinklyProLight(CoordinatorEntity[TwinklyProCoordinator], LightEntity):
         super().__init__(coordinator)
         mac = (
             coordinator.data.gestalt.mac
-            if coordinator.data
-            else coordinator.entry.data.get("mac", coordinator.host)
+            if coordinator.data and coordinator.data.gestalt.mac
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_light"
         self._attr_device_info = coordinator.device_info
 
     @property
     def _led_profile(self) -> str:
-        """Return device LED profile (RGB or RGBW)."""
+        """Return device LED profile (RGB, RGBW, or AWW)."""
         if self.coordinator.data:
             return self.coordinator.data.gestalt.led_profile
-        return str(self.coordinator.entry.data.get("led_profile", "RGB"))
+        return str(self.coordinator.device_config.get("led_profile", "RGB"))
 
     @property
     def supported_color_modes(self) -> set[ColorMode]:

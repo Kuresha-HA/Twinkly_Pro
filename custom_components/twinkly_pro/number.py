@@ -10,7 +10,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
-from .coordinator import TwinklyProCoordinator
+from .coordinator import TwinklyProCoordinator, get_entry_coordinators
 
 
 async def async_setup_entry(
@@ -19,15 +19,13 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Twinkly Pro number entities dynamically from DeviceCapabilities."""
-    coordinator: TwinklyProCoordinator = hass.data[DOMAIN]["coordinators"][
-        entry.entry_id
-    ]
-    caps = coordinator.capabilities
     entities: list[NumberEntity] = []
-    if caps.device_category == "music_dongle":
-        entities.append(TwinklyMicSensitivityNumber(coordinator))
-    elif caps.supports_light and caps.supports_brightness:
-        entities.append(TwinklyBrightnessNumber(coordinator))
+    for coordinator in get_entry_coordinators(hass, entry):
+        caps = coordinator.capabilities
+        if caps.device_category == "music_dongle":
+            entities.append(TwinklyMicSensitivityNumber(coordinator))
+        elif caps.supports_light and caps.supports_brightness:
+            entities.append(TwinklyBrightnessNumber(coordinator))
     if entities:
         async_add_entities(entities)
 
@@ -52,7 +50,7 @@ class TwinklyBrightnessNumber(
         mac = (
             coordinator.data.gestalt.mac
             if coordinator.data and coordinator.data.gestalt.mac
-            else coordinator.entry.data.get("mac", coordinator.host)
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_brightness_pct"
         self._attr_device_info = coordinator.device_info
@@ -90,7 +88,7 @@ class TwinklyMicSensitivityNumber(
         mac = (
             coordinator.data.gestalt.mac
             if coordinator.data and coordinator.data.gestalt.mac
-            else coordinator.entry.data.get("mac", coordinator.host)
+            else coordinator.device_config.get("mac", coordinator.coord_id)
         )
         self._attr_unique_id = f"{mac}_mic_sensitivity"
         self._attr_device_info = coordinator.device_info

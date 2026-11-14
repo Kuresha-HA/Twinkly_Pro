@@ -294,13 +294,16 @@ class TwinklyCloudClient:
                         elif isinstance(data, dict):
                             # Could be {"devices": [...]} or {"objects": [...]} or {"data": [...]}
                             found_list = False
-                            for k in (bucket, "data", "items", "devices", "objects"):
+                            for k in dict.fromkeys(
+                                (bucket, "data", "items", "devices", "objects")
+                            ):
                                 sub = data.get(k)
                                 if isinstance(sub, list):
                                     inventory[bucket].extend(
                                         [x for x in sub if isinstance(x, dict)]
                                     )
                                     found_list = True
+                                    break
                             if not found_list:
                                 inventory[bucket].append(data)
             except Exception as err:
@@ -311,17 +314,6 @@ class TwinklyCloudClient:
             _fetch_endpoint("objects", "/objects"),
             _fetch_endpoint("profile", "/users/me"),
         )
-        try:
-            import json as _json
-
-            _LOGGER.warning(
-                "[TWINKLY CLOUD DIAGNOSTIC] devices=%s | objects=%s | profile=%s",
-                _json.dumps(inventory.get("devices", []), ensure_ascii=False, default=str),
-                _json.dumps(inventory.get("objects", []), ensure_ascii=False, default=str),
-                _json.dumps(inventory.get("profile", []), ensure_ascii=False, default=str),
-            )
-        except Exception:
-            pass
         return inventory
 
     async def _async_cloud_flow(
@@ -347,11 +339,15 @@ class TwinklyCloudClient:
 
         # 1. Inspect /v2/objects (virtual objects, grouped compositions, scenes, installations)
         device_to_comp: dict[str, tuple[str, str, str]] = {}  # mac_or_uuid -> (group_uid, comp_name, scene_name)
+        obj_created_by_name: dict[str, str] = {}
         for obj in cloud_inv.get("objects", []):
             if not isinstance(obj, dict):
                 continue
             obj_id = str(obj.get("id") or obj.get("uuid") or obj.get("uid") or "")
             obj_name = str(obj.get("name") or obj.get("title") or "")
+            obj_created = str(obj.get("created") or "")
+            if obj_name and obj_created:
+                obj_created_by_name[obj_name] = obj_created
             scene = str(
                 obj.get("scene")
                 or obj.get("room")
@@ -408,7 +404,12 @@ class TwinklyCloudClient:
         for cdev in cloud_inv.get("devices", []):
             if not isinstance(cdev, dict):
                 continue
-            if cdev.get("deleted") or cdev.get("is_deleted") or cdev.get("archived"):
+            if (
+                cdev.get("deleted")
+                or cdev.get("is_deleted")
+                or cdev.get("archived")
+                or cdev.get("disabled") is True
+            ):
                 continue
             mac = _normalize_mac(
                 str(
@@ -418,14 +419,20 @@ class TwinklyCloudClient:
                     or ""
                 )
             )
-            uid = str(cdev.get("uuid") or cdev.get("id") or cdev.get("uid") or "")
+            uid = str(
+                cdev.get("uniqueId")
+                or cdev.get("uuid")
+                or cdev.get("id")
+                or cdev.get("uid")
+                or ""
+            )
             key = mac or uid.lower()
             if not key or key in seen_keys:
                 continue
-            seen_keys.add(key)
 
             pcode = str(
-                cdev.get("product_code")
+                cdev.get("productCode")
+                or cdev.get("product_code")
                 or cdev.get("model")
                 or cdev.get("type")
                 or cdev.get("device_type")
@@ -434,6 +441,7 @@ class TwinklyCloudClient:
             is_music = (
                 pcode.upper().startswith("TMD")
                 or "music" in pcode.lower()
+                or cdev.get("family") == 5
                 or str(cdev.get("fw_family", "")).upper() == "M"
                 or "music" in str(cdev.get("name", "")).lower()
             )
@@ -445,15 +453,36 @@ class TwinklyCloudClient:
                 or cdev.get("device_name")
                 or ("Twinkly Music" if is_music else "Twinkly")
             )
+
+            # Filter out stale/unlinked cloud devices whose hardware record was last updated
+            # months before the current home object was created (e.g. removed garlands sitting in a box)
+            dev_updated = str(cdev.get("updated") or "")
+            obj_created = obj_created_by_name.get(name, "")
+            if (
+                not is_music
+                and dev_updated
+                and obj_created
+                and dev_updated[:10] < obj_created[:10]
+            ):
+                continue
+
+            seen_keys.add(key)
+
             leds = int(
-                cdev.get("number_of_led")
+                cdev.get("ledCount")
+                or cdev.get("number_of_led")
                 or cdev.get("led_count")
                 or cdev.get("leds")
                 or 0
             )
-            profile = str(
-                cdev.get("led_profile") or ("MUSIC" if is_music else "RGB")
-            ).upper()
+            profile = (
+                "MUSIC"
+                if is_music
+                else str(
+                    cdev.get("ledProfile") or cdev.get("led_profile") or "RGB"
+                ).upper()
+            )
+            fw_ver = str(cdev.get("firmware") or cdev.get("fw_version") or "")
             host_ip = str(
                 cdev.get("ip")
                 or cdev.get("local_ip")
@@ -491,11 +520,13 @@ class TwinklyCloudClient:
                     product_code=pcode,
                     number_of_led=leds,
                     led_profile=profile,
+                    fw_version=fw_ver,
                     sync_mode=sync_mode,
                     group_uid=group_uid,
                     scene_name=scene,
                     composition_name=comp_name,
                     source="cloud",
+                    online=bool(is_music and host_ip),
                 )
             )
 
@@ -528,7 +559,7 @@ class TwinklyCloudClient:
             if ldev.mac:
                 lan_by_mac[_normalize_mac(ldev.mac)] = ldev
             if ldev.uuid:
-                lan_by_uuid[ldev.uuid] = ldev
+                lan_by_uuid[ldev.uuid.lower()] = ldev
 
         final_cloud_devices: list[DiscoveredTwinklyDevice] = []
         matched_lan_ids: set[str] = set()
@@ -538,11 +569,12 @@ class TwinklyCloudClient:
                 lan_by_mac.get(_normalize_mac(cdev.mac))
                 if cdev.mac
                 else None
-            ) or (lan_by_uuid.get(cdev.uuid) if cdev.uuid else None)
+            ) or (lan_by_uuid.get(cdev.uuid.lower()) if cdev.uuid else None)
 
             if matched_lan:
                 matched_lan_ids.add(matched_lan.unique_id)
                 matched_lan.source = "cloud+lan"
+                matched_lan.online = True
                 if cdev.name and matched_lan.name in ("Twinkly", ""):
                     matched_lan.name = cdev.name
                 if cdev.scene_name:
@@ -553,31 +585,25 @@ class TwinklyCloudClient:
                     matched_lan.group_uid = cdev.group_uid
                 final_cloud_devices.append(matched_lan)
             else:
-                # Cloud device is offline or didn't respond to UDP broadcast
-                if cdev.host:
+                # Cloud device didn't respond to UDP broadcast
+                if cdev.host and not cdev.is_music_dongle:
                     probed = await async_probe_discovered_host(
                         cdev.host, session=session, fallback_name=cdev.name
                     )
                     if probed:
                         probed.source = "cloud+lan"
+                        probed.online = True
                         probed.scene_name = cdev.scene_name
                         probed.composition_name = cdev.composition_name
                         matched_lan_ids.add(probed.unique_id)
                         final_cloud_devices.append(probed)
                         continue
-                    # Stale IP in cloud and device didn't respond -> mark offline
-                    cdev.host = ""
+                    cdev.online = False
                 final_cloud_devices.append(cdev)
 
         lan_only_devices = [
             ldev for ldev in lan_devices if ldev.unique_id not in matched_lan_ids
         ]
-        _LOGGER.warning(
-            "[TWINKLY LAN DIAGNOSTIC] lan_devices=%s | cloud_matched=%s | lan_only=%s",
-            [(d.name, d.host, d.mac, d.uuid, d.product_code) for d in lan_devices],
-            list(matched_lan_ids),
-            [(d.name, d.host, d.mac, d.uuid, d.product_code) for d in lan_only_devices],
-        )
         merged_devices = final_cloud_devices + lan_only_devices
 
         # Also infer compositions from controller Master/Slave sync state on LAN

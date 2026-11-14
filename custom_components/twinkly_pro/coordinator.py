@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
     CONF_DEVICE_NAME,
+    CONF_DEVICES,
     CONF_GROUP_UID,
     CONF_HOST,
     CONF_LED_PROFILE,
@@ -42,6 +43,18 @@ from .twinkly_client import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def get_entry_coordinators(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> list[TwinklyProCoordinator]:
+    """Return all TwinklyProCoordinators associated with a ConfigEntry."""
+    domain_data = hass.data.get(DOMAIN, {})
+    entry_coords = domain_data.get("entry_coordinators", {}).get(entry.entry_id)
+    if isinstance(entry_coords, list):
+        return entry_coords
+    single = domain_data.get("coordinators", {}).get(entry.entry_id)
+    return [single] if single else []
+
+
 class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
     """Coordinator managing polling, RT streaming, and Master/Slave routing for a Twinkly device."""
 
@@ -50,10 +63,23 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         hass: HomeAssistant,
         entry: ConfigEntry,
         host: str,
+        device_config: dict[str, Any] | None = None,
+        coord_id: str | None = None,
     ) -> None:
         """Initialize the Twinkly Pro coordinator."""
         self.entry = entry
         self.host = host
+        self.device_config: dict[str, Any] = (
+            dict(device_config) if device_config is not None else dict(entry.data)
+        )
+        raw_id = (
+            coord_id
+            or self.device_config.get(CONF_MAC)
+            or host
+            or entry.unique_id
+            or entry.entry_id
+        )
+        self.coord_id: str = str(raw_id).lower()
         session = async_get_clientsession(hass)
         self.client = TwinklyClient(host=host or "127.0.0.1", session=session)
         self.streamer = TwinklyRealtimeStreamer(self.client)
@@ -61,7 +87,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         super().__init__(
             hass,
             _LOGGER,
-            name=f"{DOMAIN}_{entry.unique_id or host}",
+            name=f"{DOMAIN}_{self.coord_id}",
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
 
@@ -70,7 +96,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         """Return the hardware & firmware capability matrix for this device."""
         if self.data is not None:
             return self.data.capabilities
-        d = self.entry.data
+        d = self.device_config
         gestalt = GestaltInfo.from_dict(
             {
                 "product_code": d.get(CONF_PRODUCT_CODE, ""),
@@ -89,22 +115,24 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
 
     def _build_offline_snapshot(self) -> TwinklyDeviceSnapshot:
         """Build a fallback snapshot from ConfigEntry metadata when a Cloud device is unplugged/offline."""
-        d = self.entry.data
+        d = self.device_config
         leds = int(d.get(CONF_NUM_LEDS, 0))
         pcode = str(d.get(CONF_PRODUCT_CODE, ""))
         profile = str(d.get(CONF_LED_PROFILE, "RGB"))
         name = str(d.get(CONF_DEVICE_NAME, "Twinkly"))
         mac = str(d.get(CONF_MAC, ""))
         group_uid = str(d.get(CONF_GROUP_UID, ""))
+        is_music = pcode.upper().startswith("TMD") or profile.upper() == "MUSIC"
 
         gestalt = GestaltInfo(
-            product_name="Twinkly Music" if pcode.upper().startswith("TMD") else "Twinkly",
+            product_name="Twinkly Music" if is_music else "Twinkly",
             product_code=pcode,
+            fw_family="M" if is_music else "G",
             device_name=name,
             mac=mac,
-            uuid=self.entry.unique_id or mac,
+            uuid=mac or self.coord_id,
             number_of_led=leds,
-            led_profile=profile,
+            led_profile="MUSIC" if is_music else profile,
             bytes_per_led=4 if profile == "RGBW" else 3,
         )
         sync = SyncInfo(
@@ -119,12 +147,12 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         return TwinklyDeviceSnapshot(
             host=self.host,
             gestalt=gestalt,
-            fw_version="offline",
-            mode="off",
+            fw_version="2.1.2" if (is_music and self.host) else "offline",
+            mode="music" if (is_music and self.host) else "off",
             sync=sync,
             layout=layout,
             capabilities=DeviceCapabilities.from_gestalt(gestalt),
-            online=False,
+            online=bool(is_music and self.host),
         )
 
     @property
@@ -134,12 +162,12 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         mac = (
             snap.gestalt.mac
             if snap and snap.gestalt.mac
-            else self.entry.data.get(CONF_MAC, self.entry.unique_id or self.host)
+            else self.device_config.get(CONF_MAC, self.coord_id)
         )
         name = (
             snap.gestalt.device_name
             if snap and snap.gestalt.device_name
-            else self.entry.data.get(CONF_DEVICE_NAME, f"Twinkly ({self.host})")
+            else self.device_config.get(CONF_DEVICE_NAME, f"Twinkly ({self.host})")
         )
         if snap and snap.gestalt.is_music_dongle:
             model = f"Twinkly Music Dongle ({snap.gestalt.product_code or 'TMD01USB'})"
@@ -149,7 +177,7 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
             model = "Twinkly Smart LED"
 
         sw_version = snap.fw_version if snap else "unknown"
-        scene_area = self.entry.data.get("scene_name") or None
+        scene_area = self.device_config.get("scene_name") or None
         config_url = f"http://{self.host}" if self.host else None
 
         return DeviceInfo(
@@ -190,8 +218,8 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
 
     async def _async_try_resolve_missing_host(self) -> bool:
         """Attempt to find local IP via UDP 5555 broadcast if device was added from Cloud without IP."""
-        target_mac = str(self.entry.data.get(CONF_MAC, "")).lower()
-        target_name = str(self.entry.data.get(CONF_DEVICE_NAME, "")).lower()
+        target_mac = str(self.device_config.get(CONF_MAC, "")).lower()
+        target_name = str(self.device_config.get(CONF_DEVICE_NAME, "")).lower()
         lan_hosts = await async_discover_lan_hosts(timeout=1.0)
         session = async_get_clientsession(self.hass)
 
@@ -210,11 +238,22 @@ class TwinklyProCoordinator(DataUpdateCoordinator[TwinklyDeviceSnapshot]):
         if not new_host or new_host == self.host:
             return
         self.host = new_host
+        self.device_config[CONF_HOST] = new_host
         session = async_get_clientsession(self.hass)
         self.client = TwinklyClient(host=new_host, session=session)
         self.streamer = TwinklyRealtimeStreamer(self.client)
         new_data = dict(self.entry.data)
-        new_data[CONF_HOST] = new_host
+        if isinstance(new_data.get(CONF_DEVICES), list):
+            updated_list = []
+            for item in new_data[CONF_DEVICES]:
+                if isinstance(item, dict) and str(item.get(CONF_MAC, "")).lower() == str(
+                    self.device_config.get(CONF_MAC, "")
+                ).lower():
+                    item = {**item, CONF_HOST: new_host}
+                updated_list.append(item)
+            new_data[CONF_DEVICES] = updated_list
+        else:
+            new_data[CONF_HOST] = new_host
         self.hass.config_entries.async_update_entry(self.entry, data=new_data)
 
     async def _async_update_data(self) -> TwinklyDeviceSnapshot:
